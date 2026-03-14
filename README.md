@@ -37,6 +37,34 @@
 - **Markdown Preservation**: A custom DOM walker reconstructs structured Markdown (code fences, headings, etc.) directly from the browser page's UI.
 - **Flexible Rendering**: Support for both Headless (silent) and Visible (interactive) browser modes.
 
+## Example Architecture for Basic Chat
+
+```plaintext
+       [ LLM Client ]           [ GeminiBackend ]             [ Playwright/Browser ]         [ Gemini Web UI ]
+      (e.g., Continue)      (gemini.py Selectors)          (Targeting CSS DOM)         (gemini.google.com)
+             |                        |                             |                           |
+             |--- 1. POST Prompt ---->|                             |                           |
+             |                        |-- 2. Check CONSENT_SELECTORS|                           |
+             |                        |   ("Accept all" / "I agree")|                           |
+             |                        |---------------------------->|----- 3. Clear Dialogs --->|
+             |                        |                             |                           |
+             |                        |-- 4. Find INPUT_SELECTORS --|                           |
+             |                        |   (rich-textarea[content])  |                           |
+             |                        |---------------------------->|---- 5. Focus & Type ----->|
+             |                        |                             |                           |
+             |                        |-- 6. Find SEND_SELECTORS ---|                           |
+             |                        |   (button[aria-label=Send]) |                           |
+             |                        |---------------------------->|---- 7. Click Send ------->|
+             |                        |                             |                           |
+             |                        |                             | <--- 8. Rendering Mat-Spinner
+             |                        |-- 9. Poll GENERATING_SEL. --|                           |
+             |                        |   (Wait for spinner to hide)|                           |
+             |                        |                             | <--- 10. <model-response> |
+             |                        |-- 11. Extract RESPONSE_SEL -|          populated        |
+             |                        |    (Scrape text from DOM)   |                           |
+             |<--- 12. Final Text ----|                             |                           |
+```
+
 ## 🛠 Prerequisites
 
 - Python 3.8+
