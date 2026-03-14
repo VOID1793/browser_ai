@@ -10,8 +10,23 @@
 
 ## Current Support
 
-* Continue VSCode AI-powered extension for agentic work and side-car chatting
-* Google Gemini Flash is the currently supported browser LLM backend
+* Continue VSCode AI-powered extension features:
+    * File Creation
+    * File Editing
+    * File Context Chatting
+    * Sidecar Chat
+* Free and Ephemeral (Non-Signed-In LLM Sessions) with:
+    * Google Gemini Flash
+
+## Coming Soon
+
+* Generalized Agent Framework
+* Open-WebUI Support
+* Multi-port serving
+* Dockerized Deployment
+* Free and Ephemeral (Non-Signed-In LLM Sessions) with:
+    * ChatGPT
+    * Perplexity
 
 ## ✨ Key Features
 
@@ -49,7 +64,7 @@ playwright install chromium
 Run the server to provide an OpenAI-compatible endpoint at `http://localhost:8000`.
 
 ```Bash
-browser-ai serve --backend gemini --visible
+browser-ai serve --backend gemini (--visible optional to have interactive browser open)
 ```
 
 ### 2. Interactive CLI
@@ -62,7 +77,7 @@ browser-ai chat --backend gemini "<your prompt here>"
 
 ### 3. Integration
 
-Point your favorite LLM client (Continue) to:
+Point your favorite LLM client (e.g. Continue) to:
 
 - Base URL: `http://localhost:8000/v1`
 - Model: `gemini` [Currently Implemented]
@@ -70,8 +85,8 @@ Point your favorite LLM client (Continue) to:
 ## 🛠 Project Structure
 
 - `browser_ai/src/backends/`: Contains the browser automation logic for different LLMs (e.g. Gemini)
-- `browser_ai/src/tunables/server.py`: FastAPI implementation of the OpenAI-compatible API.
-- `browser_ai/src/tunables/cli.py`: Command-line interface logic.
+- `browser_ai/src/browser_ai/server.py`: FastAPI implementation of the OpenAI-compatible API.
+- `browser_ai/src/browser_ai/cli.py`: Command-line interface logic.
 - `browser_ai/src/pyproject.toml`: Project dependencies and entry points.
 ## 📜 License
 

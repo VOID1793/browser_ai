@@ -95,8 +95,7 @@ def cmd_backends(_args) -> None:
     print("\nAvailable backends:\n")
     statuses = {
         "gemini":     ("✓ implemented", "https://gemini.google.com/app"),
-        "chatgpt":    ("○ stub only",   "https://chat.openai.com"),
-        "grok":       ("○ stub only",   "https://grok.com"),
+        "chatgpt":    ("○ in progress",   "https://chat.openai.com"),
         "perplexity": ("○ stub only",   "https://www.perplexity.ai"),
     }
     for name in sorted(REGISTRY):

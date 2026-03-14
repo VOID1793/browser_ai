@@ -5,13 +5,11 @@ from typing import Type
 from browser_ai.backends.base import BrowserBackend
 from browser_ai.backends.gemini import GeminiBackend
 from browser_ai.backends.chatgpt import ChatGPTBackend
-from browser_ai.backends.grok import GrokBackend
 from browser_ai.backends.perplexity import PerplexityBackend
 
 REGISTRY: dict[str, Type[BrowserBackend]] = {
     "gemini": GeminiBackend,
     "chatgpt": ChatGPTBackend,
-    "grok": GrokBackend,
     "perplexity": PerplexityBackend,
 }
 
