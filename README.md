@@ -1,4 +1,4 @@
-# 🌐 Browser_Ai V0.5
+# 🌐 Browser_Ai V0.6
 
 **Browser_Ai is an asynchronous, Playwright-backed automation bridge that transforms public AI ChatBot web interfaces into a local OpenAI-compatible API server.**
 
