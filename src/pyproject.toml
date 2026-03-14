@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "browser-ai"
+version = "0.1.0"
+description = "OpenAI-compatible API server backed by browser automation against LLM web UIs"
+requires-python = ">=3.9"
+license = "MIT"
+keywords = ["llm", "openai", "gemini", "playwright", "browser-automation"]
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.29.0",
+    "pydantic>=2.0.0",
+    "playwright>=1.44.0",
+]
+
+[project.scripts]
+browser-ai = "browser_ai.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["browser_ai*"]

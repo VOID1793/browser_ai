@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 """
 gemini_openai_server.py
 
@@ -1590,6 +1589,54 @@ async def chat_completions(
     # Gemini didn't follow the format.
     if has_tools:
         tool_call = extract_tool_call(response_text)
+
+        # ── Tool argument rescue ───────────────────────────────────────────────
+        # Gemini reliably produces the tool name but frequently omits large
+        # string arguments (e.g. `contents` for create_new_file) because JSON-
+        # encoding kilobytes of markdown inside a single string is beyond what
+        # it does accurately via prompt engineering.
+        #
+        # Strategy: if we detect a file-write call with a missing or empty
+        # content argument, look backwards through the current message history
+        # for the last substantial assistant message and use that as the content.
+        # This is safe because the user explicitly asked to "write what you just
+        # gave me to a file", so the most recent assistant turn IS the content.
+        #
+        # FILE_WRITE_TOOLS: tool names that write content to a file and whose
+        # primary payload argument we can rescue from history.
+        FILE_WRITE_TOOLS = {"create_new_file", "write_file", "create_file", "write_to_file"}
+        CONTENT_ARG_NAMES = ("contents", "content", "text", "body", "data")
+
+        if tool_call and tool_call.get("name") in FILE_WRITE_TOOLS:
+            args = tool_call.get("arguments", {})
+            content_key = next((k for k in CONTENT_ARG_NAMES if k in args), None)
+            content_val = args.get(content_key, "") if content_key else ""
+
+            if not content_val or not str(content_val).strip():
+                # Content argument is missing or empty — rescue from history
+                rescued = None
+                for msg in reversed(normalized):
+                    if msg["role"] == "assistant" and len(msg["content"].strip()) > 100:
+                        rescued = msg["content"].strip()
+                        break
+
+                if rescued:
+                    target_key = content_key or "contents"
+                    tool_call["arguments"][target_key] = rescued
+                    print(
+                        f"[server] Rescued empty '{target_key}' argument for "
+                        f"{tool_call['name']} from last assistant message "
+                        f"({len(rescued)} chars).",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[server] WARNING: {tool_call['name']} has empty content "
+                        f"and no prior assistant message to rescue from.",
+                        flush=True,
+                    )
+        # ──────────────────────────────────────────────────────────────────────
+
         if tool_call:
             print(f"[server] Tool call detected: {tool_call['name']}({list(tool_call['arguments'].keys())})", flush=True)
             tool_call_id = f"call_{uuid.uuid4().hex[:16]}"
