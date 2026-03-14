@@ -365,6 +365,10 @@ class BaseBrowserBackend(BrowserBackend):
                 except Exception:
                     pass
 
+            # Per-backend hook: dismiss popups that may have appeared
+            # mid-response (e.g. ChatGPT login nudge).
+            await self._dismiss_interstitials(self._page)
+
             if len(responses) <= prev_response_count:
                 continue
 
@@ -396,6 +400,23 @@ class BaseBrowserBackend(BrowserBackend):
             if last_text
             else f"[browser-ai: {self.label} response timed out]"
         )
+
+    async def _post_deliver_wait(self, pg) -> None:
+        """
+        Optional hook called after prompt delivery and before send-button
+        search.  Default is a no-op.  Override in backends whose UI reveals
+        the send button asynchronously after input (e.g. Grok).
+        """
+        pass
+
+    async def _dismiss_interstitials(self, pg) -> None:
+        """
+        Optional hook to dismiss mid-session modals/popups.
+        Called once per polling iteration in _wait_for_response.
+        Default is a no-op.  Override in backends that show interstitials
+        (e.g. ChatGPT login nudge).
+        """
+        pass
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -460,6 +481,10 @@ class BaseBrowserBackend(BrowserBackend):
 
             await self._deliver_prompt(pg, input_box, prompt)
             await pg.wait_for_timeout(300)
+
+            # Optional per-backend hook: extra wait after delivery so UIs
+            # that reveal their send button asynchronously have time to do so.
+            await self._post_deliver_wait(pg)
 
             # Find and click the send button, or fall back to Enter
             sent = False
