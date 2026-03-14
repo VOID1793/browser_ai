@@ -190,6 +190,106 @@ def build_transcript_prompt(messages: List[Dict[str, str]]) -> str:
     ).strip()
 
 
+# Keywords that indicate the user wants a markdown document as output.
+# Used to decide whether to ask Gemini to wrap its response in a fence.
+_MARKDOWN_DOC_HINTS = frozenset({
+    "readme", "readme.md", ".md", "markdown", "document", "documentation",
+    "write a doc", "write doc", "generate doc", "create doc",
+})
+
+_WRAP_INSTRUCTION = (
+    "\n\nIMPORTANT: Your entire response must be wrapped in a single "
+    "```markdown ... ``` code fence so it can be copied as raw text. "
+    "Do not render or interpret the markdown — output it as a raw string "
+    "inside the fence."
+)
+
+
+def _is_markdown_doc_request(instruction: str) -> bool:
+    """Return True if the instruction is asking for a markdown document."""
+    lowered = instruction.lower()
+    return any(hint in lowered for hint in _MARKDOWN_DOC_HINTS)
+
+
+def _unwrap_markdown_fence(text: str) -> str:
+    """
+    If Gemini wrapped its response in an outer ```markdown ... ``` fence
+    (as instructed by _WRAP_INSTRUCTION), strip the wrapper and return
+    the raw content inside.
+
+    Also handles ``` ``` (no language tag) as a fallback.
+    Leaves the text unchanged if no outer fence is detected.
+    """
+    text = text.strip()
+    for open_tag in ("```markdown", "```md", "```"):
+        if text.startswith(open_tag):
+            inner = text[len(open_tag):]
+            # Strip the closing fence — find the last ``` 
+            last = inner.rfind("```")
+            if last != -1:
+                return inner[:last].strip()
+    return text
+
+
+def _reorder_user_message(user_content: str) -> str:
+    """
+    When Continue (or similar editors) injects file context, the user message
+    arrives in this shape:
+
+        ```lang path/to/file (lines)
+        <entire file contents>
+        ```
+        <actual instruction from the user>
+
+    Gemini receives the whole thing as one paste. Because the code block is
+    dominant (often 40k+ chars) and the instruction is a small tail, Gemini
+    pattern-matches on the code and ignores or misreads the instruction.
+
+    This function detects that pattern and reorders the message so the
+    instruction leads and the code context follows:
+
+        <actual instruction>
+
+        Here is the relevant code context:
+        ```lang path/to/file
+        <file contents>
+        ```
+
+    Additionally, if the instruction looks like a request for a markdown
+    document (README, .md file, etc.), we append _WRAP_INSTRUCTION so that
+    Gemini wraps its entire response in a ```markdown fence. This lets
+    clean_response_text() extract the raw markdown reliably, bypassing the
+    Gemini UI's markdown rendering which mangles inner_text() output.
+    """
+    content = user_content.strip()
+
+    # Find the last closing fence — everything after it is the instruction.
+    last_fence_end = content.rfind("\n```")
+    if last_fence_end == -1:
+        # No code fence — check if the plain instruction wants a markdown doc
+        if _is_markdown_doc_request(content):
+            return content + _WRAP_INSTRUCTION
+        return content
+
+    after_fence = content[last_fence_end + 4:].strip()  # +4 skips "\n```"
+
+    # Only reorder if there is a non-trivial instruction after the final fence.
+    if len(after_fence) < 10:
+        return content
+
+    code_block = content[: last_fence_end + 4].strip()
+
+    instruction = after_fence
+    if _is_markdown_doc_request(instruction):
+        instruction = instruction + _WRAP_INSTRUCTION
+
+    return (
+        f"{instruction}\n\n"
+        f"Here is the relevant code context:\n\n"
+        f"{code_block}"
+    )
+
+
 def build_incremental_prompt(
     previous_messages: Optional[List[Dict[str, str]]],
     current_messages: List[Dict[str, str]],
@@ -220,6 +320,9 @@ def build_incremental_prompt(
         if not latest_user:
             return build_transcript_prompt(current_messages), False
 
+        # Reorder so the user instruction leads over any large code context block
+        latest_user = _reorder_user_message(latest_user)
+
         if system_parts:
             prompt = (
                 "Please follow these instructions for this conversation:\n"
@@ -238,7 +341,7 @@ def build_incremental_prompt(
                 return m["content"].strip(), False
         return build_transcript_prompt(current_messages), False
 
-    # Prefix extension case
+    # Prefix extension case — exact match
     if (
         len(current_messages) >= len(previous_messages)
         and current_messages[: len(previous_messages)] == previous_messages
@@ -257,7 +360,33 @@ def build_incremental_prompt(
         # No new user content found -> fallback
         return build_transcript_prompt(current_messages), True
 
-    # History diverged; safest approach is reset + transcript prompt
+    # Soft prefix match: strip leading system/developer messages from both
+    # sides and retry. This handles the case where Continue switches from
+    # chat mode to agent mode and prepends a different system message,
+    # which would otherwise cause a spurious divergence reset.
+    def _strip_system(msgs):
+        return [m for m in msgs if m["role"] not in {"system", "developer"}]
+
+    cur_stripped = _strip_system(current_messages)
+    prev_stripped = _strip_system(previous_messages)
+
+    if (
+        len(cur_stripped) >= len(prev_stripped)
+        and cur_stripped[: len(prev_stripped)] == prev_stripped
+    ):
+        delta = cur_stripped[len(prev_stripped):]
+        bad_roles = {"tool"}   # system/developer already stripped
+        if any(m["role"] in bad_roles for m in delta):
+            return build_transcript_prompt(current_messages), True
+        for m in reversed(delta):
+            if m["role"] == "user" and m["content"].strip():
+                print("[prompt] Soft prefix match (system msg swap) — sending delta only.", flush=True)
+                return m["content"].strip(), False
+        # No new user turn in delta after stripping — fall through to reset
+        # but send a transcript so the new system context is preserved
+        return build_transcript_prompt(current_messages), True
+
+    # History truly diverged; safest approach is reset + transcript prompt
     return build_transcript_prompt(current_messages), True
 
 
@@ -299,6 +428,10 @@ def clean_response_text(raw: str) -> str:
 
     # 3. Collapse runs of more than 2 consecutive blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
+
+    # 4. Unwrap outer ```markdown fence if Gemini used it at our instruction.
+    #    This recovers the raw markdown content before returning it to the client.
+    text = _unwrap_markdown_fence(text)
 
     return text.strip()
 
@@ -486,12 +619,194 @@ async def extract_clean_response_text(element) -> str:
 
 
 # =============================================================================
+# Tool-call support (prompt-engineering layer)
+# =============================================================================
+
+def serialize_tools_to_prompt(tools: List[Any]) -> str:
+    """
+    Convert an OpenAI-style tools array into a plain-text section appended
+    to the end of the prompt, instructing Gemini to respond with a structured
+    JSON tool call when appropriate.
+
+    Appending (rather than prepending) means this section is the last thing
+    Gemini reads before generating its response, giving it the best chance of
+    following the TOOL_CALL format even when the prompt is very large.
+
+    The format we ask Gemini to use:
+
+        TOOL_CALL: {"name": "...", "arguments": {...}}
+
+    This is easy to parse reliably with a regex and unlikely to appear
+    in normal prose responses.
+    """
+    if not tools:
+        return ""
+
+    lines = [
+        "=" * 60,
+        "IMPORTANT INSTRUCTIONS — READ THIS LAST, BEFORE RESPONDING",
+        "=" * 60,
+        "",
+        "You have access to tools. To use a tool you MUST respond with",
+        "EXACTLY the following on its own line as your ENTIRE response",
+        "(no prose before or after the TOOL_CALL line):",
+        "",
+        '    TOOL_CALL: {"name": "<tool_name>", "arguments": {<args as JSON>}}',
+        "",
+        "If no tool is needed, respond normally in plain text.",
+        "If you use a tool, output ONLY the TOOL_CALL line — nothing else.",
+        "",
+        "Available tools:",
+        "",
+    ]
+
+    for tool in tools:
+        try:
+            # Accept both Tool pydantic objects and raw dicts
+            if hasattr(tool, "function"):
+                fn = tool.function
+                name = fn.name
+                desc = fn.description or ""
+                params = fn.parameters or {}
+            else:
+                fn = tool.get("function", {})
+                name = fn.get("name", "unknown")
+                desc = fn.get("description", "")
+                params = fn.get("parameters", {})
+
+            lines.append(f"- {name}: {desc}")
+
+            # Summarise parameters if present
+            props = params.get("properties", {}) if isinstance(params, dict) else {}
+            required = params.get("required", []) if isinstance(params, dict) else []
+            if props:
+                for pname, pschema in props.items():
+                    req_marker = " (required)" if pname in required else ""
+                    pdesc = pschema.get("description", "") if isinstance(pschema, dict) else ""
+                    ptype = pschema.get("type", "") if isinstance(pschema, dict) else ""
+                    lines.append(f"    - {pname} [{ptype}]{req_marker}: {pdesc}")
+        except Exception:
+            # Malformed tool definition — skip it rather than crash
+            continue
+
+    return "\n".join(lines) + "\n"
+
+
+# Regex to find a TOOL_CALL line in Gemini's response.
+# We allow optional whitespace and accept both the line on its own
+# and embedded inside a larger response (fallback plain-text path).
+_TOOL_CALL_RE = re.compile(
+    r"TOOL_CALL:\s*(\{.*?\})",
+    re.DOTALL,
+)
+
+
+def extract_tool_call(response_text: str) -> Optional[Dict[str, Any]]:
+    """
+    Try to extract a structured tool call from Gemini's response.
+
+    Returns a dict with keys:
+        name       str   — tool/function name
+        arguments  dict  — parsed argument dict
+
+    Returns None if no valid tool call is found, which means the caller
+    should treat the response as a normal plain-text answer.
+
+    This function never raises — all parse failures return None.
+    """
+    match = _TOOL_CALL_RE.search(response_text)
+    if not match:
+        return None
+
+    json_str = match.group(1).strip()
+    try:
+        parsed = json.loads(json_str)
+    except json.JSONDecodeError:
+        # Try to salvage by stripping trailing junk after the last }
+        try:
+            json_str = json_str[: json_str.rfind("}") + 1]
+            parsed = json.loads(json_str)
+        except Exception:
+            return None
+
+    name = parsed.get("name")
+    arguments = parsed.get("arguments", {})
+
+    if not name or not isinstance(name, str):
+        return None
+    if not isinstance(arguments, dict):
+        arguments = {}
+
+    return {"name": name, "arguments": arguments}
+
+
+def normalize_messages_with_tools(messages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """
+    Extended normalizer that understands tool-related message shapes:
+
+    - role=assistant with tool_calls list: flatten into a readable text
+      representation so build_incremental_prompt can include it in
+      transcripts without triggering a divergence reset.
+    - role=tool with tool_call_id: format as a labelled tool result.
+    - All other roles: delegate to standard normalize_messages logic.
+    """
+    normalized: List[Dict[str, str]] = []
+
+    for m in messages:
+        role = str(m.get("role", "user")).strip().lower()
+
+        if role == "assistant":
+            tool_calls = m.get("tool_calls")
+            if tool_calls:
+                # Flatten tool_calls into readable text so history tracking works
+                parts = []
+                raw_content = extract_text_content(m.get("content", ""))
+                if raw_content:
+                    parts.append(raw_content)
+                for tc in tool_calls:
+                    try:
+                        fn = tc.get("function", {}) if isinstance(tc, dict) else {}
+                        tc_name = fn.get("name", "unknown")
+                        tc_args = fn.get("arguments", "{}")
+                        tc_json = json.dumps({"name": tc_name, "arguments": tc_args})
+                        parts.append(f"TOOL_CALL: {tc_json}")
+                    except Exception:
+                        pass
+                normalized.append({"role": "assistant", "content": "\n".join(parts)})
+                continue
+
+        if role == "tool":
+            tool_call_id = m.get("tool_call_id", "")
+            content = extract_text_content(m.get("content", ""))
+            label = f"[tool_result id={tool_call_id}]" if tool_call_id else "[tool_result]"
+            normalized.append({"role": "tool", "content": f"{label}\n{content}"})
+            continue
+
+        # Standard path
+        content = extract_text_content(m.get("content", ""))
+        normalized.append({"role": role, "content": content})
+
+    return normalized
+
+
+# =============================================================================
 # OpenAI-compatible request/response models
 # =============================================================================
 
 class ChatMessage(BaseModel):
     role: str
     content: Any
+
+
+class ToolFunction(BaseModel):
+    name: str
+    description: Optional[str] = None
+    parameters: Optional[Dict[str, Any]] = None
+
+
+class Tool(BaseModel):
+    type: str = "function"
+    function: ToolFunction
 
 
 class ChatCompletionRequest(BaseModel):
@@ -501,6 +816,8 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = None
     stream: Optional[bool] = False
     user: Optional[str] = None
+    tools: Optional[List[Tool]] = None
+    tool_choice: Optional[Any] = None   # "auto" | "none" | {type, function} — accepted but not enforced
 
 
 class ModelCard(BaseModel):
@@ -872,6 +1189,9 @@ class SessionState:
     # We do NOT validate this token; it's an opaque passthrough.
     auth_header: Optional[str] = None
     previous_messages: Optional[List[Dict[str, str]]] = None
+    # Last tools array seen for this session; persisted so follow-up turns
+    # that omit tools (common in agentic loops) still get the preamble injected.
+    last_tools: Optional[List[Any]] = None
 
 
 class SessionManager:
@@ -1123,9 +1443,46 @@ async def chat_completions(
     if session_manager is None:
         raise HTTPException(status_code=503, detail="Session manager not ready")
 
-    normalized = normalize_messages([m.model_dump() for m in body.messages])
+    # Use the tool-aware normalizer so tool_calls / tool results in history
+    # are flattened to plain text rather than triggering divergence resets.
+    normalized = normalize_messages_with_tools([m.model_dump() for m in body.messages])
     if not normalized:
         raise HTTPException(status_code=400, detail="messages cannot be empty")
+
+    # ── Throwaway request detection ───────────────────────────────────────────
+    # Continue (and some other clients) fire a background request after each
+    # response to auto-generate a chat title. These requests have a single
+    # user message asking for a short title and carry no real conversation
+    # history. We must not let them reset the browser session.
+    #
+    # Detection: exactly 1 message, role=user, content contains the phrase
+    # "reply with a title" (Continue's exact wording as of current versions).
+    # We answer with a lightweight stub and return immediately, leaving the
+    # session state completely untouched.
+    if (
+        len(normalized) == 1
+        and normalized[0]["role"] == "user"
+        and "reply with a title" in normalized[0]["content"].lower()
+    ):
+        print("[server] Detected chat-titling request — returning stub without touching session.", flush=True)
+        stub_id = f"chatcmpl-{uuid.uuid4().hex}"
+        stub_title = "Gemini Browser Chat"
+        if body.stream:
+            async def _title_stream():
+                yield _sse_chunk(stub_id, now_ts(), stub_title)
+                yield _sse_done_chunk(stub_id, now_ts())
+            return StreamingResponse(_title_stream(), media_type="text/event-stream")
+        return JSONResponse(content={
+            "id": stub_id,
+            "object": "chat.completion",
+            "created": now_ts(),
+            "model": MODEL_ID,
+            "system_fingerprint": SYSTEM_FINGERPRINT,
+            "choices": [{"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant", "content": stub_title}}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        })
+    # ─────────────────────────────────────────────────────────────────────────
 
     session_key = make_session_key(
         authorization=authorization,
@@ -1155,13 +1512,48 @@ async def chat_completions(
 
     state.last_used_at = time.time()
 
+    # ── Tool preamble injection ───────────────────────────────────────────────
+    # Position matters: prepending to an 82k-char prompt buries the instructions
+    # before a wall of code that dominates Gemini's attention. Instead we append
+    # the tool preamble AFTER the prompt content so it is the last thing Gemini
+    # reads before generating its response — giving it the best chance of
+    # following the TOOL_CALL format.
+    #
+    # We also carry `has_tools` forward so the response parser knows whether to
+    # attempt tool-call extraction regardless of whether tools appear on this
+    # specific turn (Continue sometimes omits tools on follow-up turns in an
+    # agentic loop).
+    has_tools = bool(body.tools)
+    # Persist tool definitions across turns so follow-up requests without a
+    # tools array still get the preamble injected.
+    if has_tools:
+        state.last_tools = body.tools   # store on session for reuse
+    elif getattr(state, "last_tools", None):
+        # Continue omitted tools this turn but we have them from last turn
+        has_tools = True
+    
+    if has_tools:
+        active_tools = body.tools if body.tools else getattr(state, "last_tools", [])
+        tool_preamble = serialize_tools_to_prompt(active_tools)
+        # Append after prompt content so it's the last thing Gemini reads
+        prompt = prompt + "\n\n" + tool_preamble
+        print(f"[server] Tool preamble appended ({len(active_tools)} tools).", flush=True)
+
     try:
         print(f"[server] Calling browser.ask() for session {session_key[:12]}...", flush=True)
         response_text = await asyncio.wait_for(
             state.browser.ask(prompt),
             timeout=RESPONSE_TIMEOUT_MS / 1000 + 15,
         )
-        state.previous_messages = normalized
+        # Store the full round-trip: user messages + the assistant reply.
+        # Continue (and most OpenAI-compatible clients) include the assistant
+        # turn in the history they send on the next request. If we only store
+        # the user-side messages here, the prefix check in build_incremental_prompt
+        # will see the assistant turn as a divergence and reset the browser
+        # session unnecessarily on every follow-up request.
+        state.previous_messages = normalized + [
+            {"role": "assistant", "content": response_text}
+        ]
         state.last_used_at = time.time()
         print(f"[server] Got response ({len(response_text)} chars).", flush=True)
     except asyncio.TimeoutError:
@@ -1188,6 +1580,91 @@ async def chat_completions(
     if x_session_id:
         resp_headers["X-Session-Id"] = x_session_id
 
+    # ── Tool-call response path ───────────────────────────────────────────────
+    # If tools were available, check whether Gemini responded with a TOOL_CALL.
+    # On success: return a tool_calls response so the client can execute the
+    # tool and send back a tool result.
+    # On parse failure: fall through silently to the normal plain-text path —
+    # this is the safe fallback that keeps the conversation going even if
+    # Gemini didn't follow the format.
+    if has_tools:
+        tool_call = extract_tool_call(response_text)
+        if tool_call:
+            print(f"[server] Tool call detected: {tool_call['name']}({list(tool_call['arguments'].keys())})", flush=True)
+            tool_call_id = f"call_{uuid.uuid4().hex[:16]}"
+            tc_message = {
+                "role": "assistant",
+                "content": None,   # OpenAI spec: content is null when tool_calls present
+                "tool_calls": [
+                    {
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_call["name"],
+                            # arguments must be a JSON string per OpenAI spec
+                            "arguments": json.dumps(tool_call["arguments"]),
+                        },
+                    }
+                ],
+            }
+            tc_payload = {
+                "id": completion_id,
+                "object": "chat.completion",
+                "created": created,
+                "model": MODEL_ID,
+                "system_fingerprint": SYSTEM_FINGERPRINT,
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "tool_calls",
+                        "message": tc_message,
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                },
+            }
+            if body.stream:
+                # Stream a single delta chunk carrying the tool_call, then done.
+                # Most clients handle tool_calls responses non-streamed, but we
+                # support stream=true here for robustness.
+                async def _tool_stream():
+                    # First chunk: role delta
+                    role_chunk = {
+                        "id": completion_id, "object": "chat.completion.chunk",
+                        "created": created, "model": MODEL_ID,
+                        "choices": [{"index": 0, "delta": {"role": "assistant", "tool_calls": [
+                            {"index": 0, "id": tool_call_id, "type": "function",
+                             "function": {"name": tool_call["name"], "arguments": ""}}
+                        ]}, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(role_chunk)}\n\n"
+                    # Second chunk: arguments
+                    args_chunk = {
+                        "id": completion_id, "object": "chat.completion.chunk",
+                        "created": created, "model": MODEL_ID,
+                        "choices": [{"index": 0, "delta": {"tool_calls": [
+                            {"index": 0, "function": {"arguments": json.dumps(tool_call["arguments"])}}
+                        ]}, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(args_chunk)}\n\n"
+                    # Final chunk
+                    done_chunk = {
+                        "id": completion_id, "object": "chat.completion.chunk",
+                        "created": created, "model": MODEL_ID,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                    }
+                    yield f"data: {json.dumps(done_chunk)}\n\ndata: [DONE]\n\n"
+
+                return StreamingResponse(_tool_stream(), media_type="text/event-stream", headers=resp_headers)
+
+            return JSONResponse(content=tc_payload, headers=resp_headers)
+        else:
+            print("[server] Tools present but no TOOL_CALL found — returning plain text response.", flush=True)
+    # ─────────────────────────────────────────────────────────────────────────
+
     if body.stream:
         # Simulated streaming: we have the full response already; chunk it
         # into SSE events so Continue and other streaming clients are happy.
@@ -1198,7 +1675,7 @@ async def chat_completions(
             headers=resp_headers,
         )
 
-    # Non-streaming response
+    # Non-streaming plain-text response.
     # Locally synthesized OpenAI-compatible wrapper fields:
     # - id, object, created, model, system_fingerprint, usage are all local metadata
     # - choices[0].message.content is the true browser-scraped Gemini response
@@ -1228,6 +1705,151 @@ async def chat_completions(
     }
 
     return JSONResponse(content=response_payload, headers=resp_headers)
+
+
+# =============================================================================
+# Legacy /v1/completions endpoint (used by Continue edit mode)
+# =============================================================================
+
+class CompletionRequest(BaseModel):
+    model: str
+    prompt: Any                        # str or list of str
+    max_tokens: Optional[int] = None
+    temperature: Optional[float] = None
+    stream: Optional[bool] = False
+    user: Optional[str] = None
+    suffix: Optional[str] = None       # present in edit-mode payloads; ignored
+
+
+def _sse_completion_chunk(chunk_id: str, created: int, text: str) -> str:
+    payload = {
+        "id": chunk_id,
+        "object": "text_completion",
+        "created": created,
+        "model": MODEL_ID,
+        "choices": [{"index": 0, "text": text, "finish_reason": None}],
+    }
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+def _sse_completion_done(chunk_id: str, created: int) -> str:
+    payload = {
+        "id": chunk_id,
+        "object": "text_completion",
+        "created": created,
+        "model": MODEL_ID,
+        "choices": [{"index": 0, "text": "", "finish_reason": "stop"}],
+    }
+    return f"data: {json.dumps(payload)}\n\ndata: [DONE]\n\n"
+
+
+async def _stream_completion(text: str, chunk_id: str, created: int):
+    tokens = re.split(r"(\s+)", text)
+    for token in tokens:
+        if token:
+            yield _sse_completion_chunk(chunk_id, created, token)
+            await asyncio.sleep(0)
+    yield _sse_completion_done(chunk_id, created)
+
+
+@app.post("/v1/completions")
+async def completions(
+    body: CompletionRequest,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+    x_session_id: Optional[str] = Header(default=None),
+    x_reset_session: Optional[str] = Header(default=None),
+):
+    """
+    Legacy text completions endpoint.
+
+    Continue's edit mode sends the selected text + instruction here as a
+    plain string prompt rather than a messages array.  We forward it to
+    the browser as a single-turn request using the same session machinery
+    as /v1/chat/completions.
+    """
+    global session_manager
+    if session_manager is None:
+        raise HTTPException(status_code=503, detail="Session manager not ready")
+
+    # Normalise prompt — can be a string or a list of strings
+    if isinstance(body.prompt, list):
+        raw_prompt = "\n".join(str(p) for p in body.prompt if p)
+    else:
+        raw_prompt = str(body.prompt or "").strip()
+
+    if not raw_prompt:
+        raise HTTPException(status_code=400, detail="prompt cannot be empty")
+
+    # Reorder code-context payloads just like we do for chat
+    prompt = _reorder_user_message(raw_prompt)
+
+    session_key = make_session_key(
+        authorization=authorization,
+        x_session_id=x_session_id,
+        openai_user=body.user,
+    )
+
+    force_reset = (x_reset_session or "").strip().lower() in {"1", "true", "yes"}
+    if force_reset:
+        state = await session_manager.reset(session_key)
+        state.auth_header = authorization
+    else:
+        state = await session_manager.get_or_create(session_key, authorization)
+
+    state.last_used_at = time.time()
+
+    print(f"[server] /v1/completions for session {session_key[:12]} ({len(prompt)} chars)...", flush=True)
+
+    try:
+        response_text = await asyncio.wait_for(
+            state.browser.ask(prompt),
+            timeout=RESPONSE_TIMEOUT_MS / 1000 + 15,
+        )
+        # Edit-mode requests are stateless one-shots; don't update previous_messages
+        state.last_used_at = time.time()
+        print(f"[server] /v1/completions got response ({len(response_text)} chars).", flush=True)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Request timed out waiting for browser response.")
+    except PlaywrightTimeoutError:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    chunk_id = f"cmpl-{uuid.uuid4().hex}"
+    created = now_ts()
+    prompt_tokens = estimate_tokens(raw_prompt)
+    completion_tokens = estimate_tokens(response_text)
+
+    resp_headers = {}
+    if x_session_id:
+        resp_headers["X-Session-Id"] = x_session_id
+
+    if body.stream:
+        print(f"[server] Streaming /v1/completions as SSE ({len(response_text)} chars).", flush=True)
+        return StreamingResponse(
+            _stream_completion(response_text, chunk_id, created),
+            media_type="text/event-stream",
+            headers=resp_headers,
+        )
+
+    return JSONResponse(content={
+        "id": chunk_id,
+        "object": "text_completion",
+        "created": created,
+        "model": MODEL_ID,
+        "choices": [{
+            "index": 0,
+            "text": response_text,        # TRUE browser-scraped content
+            "finish_reason": "stop",
+            "logprobs": None,
+        }],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+    }, headers=resp_headers)
 
 
 # =============================================================================
