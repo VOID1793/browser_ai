@@ -6,9 +6,8 @@
   const clearBtn = document.querySelector('#clearBtn');
   const chatEl = document.querySelector('#chat');
   const statusEl = document.querySelector('#status');
-  const streamCheckbox = document.querySelector('#stream');
 
-  if (!modelInput || !promptInput || !sendBtn || !clearBtn || !chatEl || !statusEl || !streamCheckbox) {
+  if (!modelInput || !promptInput || !sendBtn || !clearBtn || !chatEl || !statusEl) {
     console.warn('[browser-ai ui] One or more required elements are missing from the DOM.');
   }
 
@@ -85,11 +84,11 @@
   }
 
   async function sendMessage() {
-    if (!modelInput || !promptInput || !streamCheckbox) return;
+    if (!modelInput || !promptInput) return;
 
     const model = modelInput.value.trim() || 'gemini';
     const userContent = promptInput.value.trim();
-    const stream = !!streamCheckbox.checked;
+    const stream = true;
 
     if (!userContent) {
       setStatus('Prompt is empty.', true);

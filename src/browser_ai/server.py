@@ -22,10 +22,12 @@ import json
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from browser_ai.backends.base import BrowserBackend
@@ -213,6 +215,22 @@ def build_app(
         version="0.1.0",
         lifespan=lifespan,
     )
+
+    static_dir = Path(__file__).parent / "static"
+    if static_dir.exists():
+        app.mount(
+            "/ui/static",
+            StaticFiles(directory=str(static_dir)),
+            name="ui-static",
+        )
+
+        @app.get("/", include_in_schema=False)
+        async def ui_root():
+            return FileResponse(static_dir / "index.html")
+
+        @app.get("/ui", include_in_schema=False)
+        async def ui_alias():
+            return FileResponse(static_dir / "index.html")
 
     # ── Exception handlers ────────────────────────────────────────────────────
 
