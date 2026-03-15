@@ -55,7 +55,7 @@ flowchart TD
     C -->|8. Wait for Loading / Spinner| D["Gemini Web UI<br>(gemini.google.com)"]
     D -->|9. Generate Model Response| D
     D -->|10. Response Rendered in DOM| E[Extract Response Text]
-    E -->|12. Return Final Text| F[LLM Client Receives Response]
+    E -->|11. Return Final Text| F[LLM Client Receives Response]
 ```
 ## 🛠 Prerequisites
 
