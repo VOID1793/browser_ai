@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "browser-ai"
-version = "0.1.0"
+version = "0.2.0"
 description = "OpenAI-compatible API server backed by browser automation against LLM web UIs"
 requires-python = ">=3.9"
 license = "MIT"
-keywords = ["llm", "openai", "gemini", "playwright", "browser-automation"]
+keywords = ["llm", "openai", "gemini", "chatgpt", "playwright", "browser-automation"]
 dependencies = [
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.29.0",

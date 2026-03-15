@@ -11,8 +11,10 @@ The server exposes an OpenAI-compatible HTTP API:
     POST /v1/completions          (legacy, used by Continue edit mode)
 
 The app object is created by build_app() which accepts runtime configuration
-(backend class, compat handler, headless flag) so that the CLI can configure
-it without mutating module-level globals.
+(backend class, compat handler, headless flag, quiet flag) so that the CLI can
+configure it without mutating module-level globals.  Multiple independent
+instances can be created pointing at different backends and bound to different
+ports — each has its own SessionManager and browser pool.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ import json
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, List, Optional, Type
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -38,8 +40,8 @@ from browser_ai.models import (
 from browser_ai.prompt import (
     build_incremental_prompt,
     normalize_messages_with_tools,
-    reorder_user_message,
 )
+from browser_ai.cleaning import strip_edit_response
 from browser_ai.session import SessionManager, make_session_key
 from browser_ai.tools import extract_tool_call, rescue_tool_arguments, serialize_tools_to_prompt
 
@@ -178,8 +180,9 @@ async def _stream_tool_call(
 
 def build_app(
     backend_class: Type[BrowserBackend],
-    headless: bool = True,
+    headless=None,
     compat=None,
+    quiet: bool = False,
 ) -> FastAPI:
     """
     Build and return a configured FastAPI application.
@@ -188,29 +191,54 @@ def build_app(
     ----------
     backend_class : Type[BrowserBackend]
         The browser backend to use for all sessions.
-    headless : bool
-        Whether to run the browser without a visible window.
+    headless : bool | None
+        True = force headless, False = force visible, None = use backend default.
     compat : CompatHandler | None
         An optional compat handler instance (e.g. ContinueCompat).
         When None, no client-specific patches are applied.
+    quiet : bool
+        Suppress internal browser-ai log lines when True.  HTTP access logs
+        are controlled separately by uvicorn's log_level.
+
+    Multiple independent instances may be created (e.g. one per backend) and
+    bound to different ports via separate uvicorn.run() calls in separate
+    processes.  Each instance owns its own SessionManager and browser pool.
     """
+    # _log() replaces bare print() throughout this module so that quiet mode
+    # suppresses our internal lines without touching uvicorn's access logs.
+    def _log(*args, **kwargs) -> None:
+        if not quiet:
+            print(*args, **kwargs)
+
     session_manager: Optional[SessionManager] = None
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         nonlocal session_manager
-        print(f"[server] Starting up (backend={backend_class.label}, headless={headless})...", flush=True)
+        effective = headless if headless is not None else backend_class.DEFAULT_HEADLESS
+        _log(
+            f"[server] Starting up (backend={backend_class.label}, "
+            f"headless={effective})...",
+            flush=True,
+        )
         session_manager = SessionManager(backend_class=backend_class, headless=headless)
         await session_manager.start()
-        yield
-        if session_manager:
-            await session_manager.shutdown()
-        print("[server] Shutdown complete.", flush=True)
+        try:
+            yield
+        finally:
+            # finally runs on both normal shutdown and Ctrl+C (SIGINT).
+            # CancelledError (BaseException, not Exception) must be caught here;
+            # if it escapes, Starlette prints a misleading ERROR traceback.
+            try:
+                await session_manager.shutdown()
+            except (asyncio.CancelledError, Exception) as exc:
+                _log(f"[server] Shutdown warning (non-fatal): {exc}", flush=True)
+            _log("[server] Shutdown complete.", flush=True)
 
     app = FastAPI(
         title="browser-ai OpenAI-Compatible Server",
         description="OpenAI-compatible API backed by browser automation.",
-        version="0.1.0",
+        version="0.2.0",
         lifespan=lifespan,
     )
 
@@ -242,7 +270,20 @@ def build_app(
 
     @app.get("/healthz")
     async def healthz():
-        return {"ok": True, "backend": backend_class.label, "model": MODEL_ID}
+        from browser_ai import __version__
+        effective_headless = headless if headless is not None else backend_class.DEFAULT_HEADLESS
+        mode = "headless" if effective_headless else (
+            "visible+minimized" if getattr(backend_class, "MINIMIZE_WINDOW", False)
+            else "visible"
+        )
+        return {
+            "ok": True,
+            "version": __version__,
+            "backend": backend_class.label,
+            "model": MODEL_ID,
+            "mode": mode,
+            "sessions": session_manager.session_count() if session_manager else 0,
+        }
 
     @app.get("/v1/models")
     async def list_models():
@@ -268,7 +309,7 @@ def build_app(
 
         # ── Compat: throwaway request interception ────────────────────────────
         if compat is not None and compat.is_throwaway_request(normalized):
-            print("[server] Intercepted throwaway request via compat handler.", flush=True)
+            _log("[server] Intercepted throwaway request via compat handler.", flush=True)
             stub_id = f"chatcmpl-{uuid.uuid4().hex}"
             stub_title = compat.stub_title_response()
             if body.stream:
@@ -293,7 +334,7 @@ def build_app(
 
         force_reset = (x_reset_session or "").strip().lower() in {"1", "true", "yes"}
         if force_reset:
-            print(f"[server] Force-resetting session {session_key[:12]}...", flush=True)
+            _log(f"[server] Force-resetting session {session_key[:12]}...", flush=True)
             state = await session_manager.reset(session_key)
             state.auth_header = authorization
         else:
@@ -305,19 +346,18 @@ def build_app(
         )
 
         if reset_required:
-            print("[server] History diverged; resetting browser session.", flush=True)
+            _log("[server] History diverged; resetting browser session.", flush=True)
             state = await session_manager.reset(session_key)
             state.auth_header = authorization
 
         state.last_used_at = time.time()
 
-        # ── Compat: prompt post-processing ────────────────────────────────────
-        # Apply client-specific prompt transformations (e.g. code reordering).
-        # This fires on the first turn (when the full user message is the prompt)
-        # and is a no-op on incremental turns that send only a short delta.
+        # Compat handler may apply additional prompt transformations.
+        # Note: reorder_user_message is now applied inside build_incremental_prompt
+        # on the raw user content, before system-prefix assembly. Do NOT call it
+        # again here.
         if compat is not None:
             prompt = compat.process_user_message(prompt)
-        # ─────────────────────────────────────────────────────────────────────
 
         # ── Tool preamble injection ───────────────────────────────────────────
         has_tools = bool(body.tools)
@@ -329,11 +369,11 @@ def build_app(
         if has_tools:
             active_tools = body.tools if body.tools else state.last_tools or []
             prompt = prompt + "\n\n" + serialize_tools_to_prompt(active_tools)
-            print(f"[server] Tool preamble appended ({len(active_tools)} tools).", flush=True)
+            _log(f"[server] Tool preamble appended ({len(active_tools)} tools).", flush=True)
         # ─────────────────────────────────────────────────────────────────────
 
         try:
-            print(f"[server] Calling browser.ask() for session {session_key[:12]}...", flush=True)
+            _log(f"[server] Calling browser.ask() for session {session_key[:12]}...", flush=True)
             response_text = await asyncio.wait_for(
                 state.browser.ask(prompt),
                 timeout=RESPONSE_TIMEOUT_MS / 1000 + 15,
@@ -342,7 +382,7 @@ def build_app(
                 {"role": "assistant", "content": response_text}
             ]
             state.last_used_at = time.time()
-            print(f"[server] Got response ({len(response_text)} chars).", flush=True)
+            _log(f"[server] Got response ({len(response_text)} chars).", flush=True)
         except asyncio.TimeoutError:
             raise HTTPException(status_code=504, detail="Request timed out.")
         except PlaywrightTimeoutError:
@@ -367,7 +407,7 @@ def build_app(
             tool_call = extract_tool_call(response_text)
             if tool_call:
                 tool_call = rescue_tool_arguments(tool_call, normalized)
-                print(
+                _log(
                     f"[server] Tool call: {tool_call['name']}"
                     f"({list(tool_call['arguments'].keys())})",
                     flush=True,
@@ -402,11 +442,11 @@ def build_app(
                     )
                 return JSONResponse(content=tc_payload, headers=resp_headers)
             else:
-                print("[server] Tools present but no TOOL_CALL detected — returning plain text.", flush=True)
+                _log("[server] Tools present but no TOOL_CALL detected — returning plain text.", flush=True)
         # ─────────────────────────────────────────────────────────────────────
 
         if body.stream:
-            print(f"[server] Streaming response ({len(response_text)} chars).", flush=True)
+            _log(f"[server] Streaming response ({len(response_text)} chars).", flush=True)
             return StreamingResponse(
                 _stream_response(response_text, completion_id, created),
                 media_type="text/event-stream",
@@ -414,16 +454,14 @@ def build_app(
             )
 
         return JSONResponse(content={
-            "id": completion_id,                    # locally generated
-            "object": "chat.completion",            # locally synthesised
-            "created": created,                     # locally generated timestamp
-            "model": MODEL_ID,                      # local alias, not upstream name
+            "id": completion_id,
+            "object": "chat.completion",
+            "created": created,
+            "model": MODEL_ID,
             "system_fingerprint": SYSTEM_FINGERPRINT,
             "choices": [{"index": 0, "finish_reason": "stop",
-                         "message": {"role": "assistant",
-                                     "content": response_text}}],  # TRUE scraped content
+                         "message": {"role": "assistant", "content": response_text}}],
             "usage": {
-                # Heuristic estimates only — NOT upstream token counts
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
@@ -455,11 +493,10 @@ def build_app(
         if not raw_prompt:
             raise HTTPException(status_code=400, detail="prompt cannot be empty")
 
-        # Apply compat prompt processing if active, otherwise fall back to
-        # the general reorder_user_message which is always safe.
         if compat is not None:
             prompt = compat.process_user_message(raw_prompt)
         else:
+            from browser_ai.prompt import reorder_user_message
             prompt = reorder_user_message(raw_prompt)
 
         session_key = make_session_key(
@@ -476,16 +513,27 @@ def build_app(
             state = await session_manager.get_or_create(session_key, authorization)
 
         state.last_used_at = time.time()
-        print(f"[server] /v1/completions for session {session_key[:12]} ({len(prompt)} chars)...", flush=True)
+        _log(
+            f"[server] /v1/completions for session {session_key[:12]} "
+            f"({len(prompt)} chars)...",
+            flush=True,
+        )
 
         try:
             response_text = await asyncio.wait_for(
                 state.browser.ask(prompt),
                 timeout=RESPONSE_TIMEOUT_MS / 1000 + 15,
             )
-            # Edit-mode is stateless — don't update previous_messages
             state.last_used_at = time.time()
-            print(f"[server] /v1/completions response ({len(response_text)} chars).", flush=True)
+            raw_len = len(response_text)
+            # Edit mode: extract the code content from any surrounding prose/fences
+            response_text = strip_edit_response(response_text)
+            _log(
+                f"[server] /v1/completions response: raw={raw_len} chars, "
+                f"after strip={len(response_text)} chars. "
+                f"Preview: {repr(response_text[:80])}",
+                flush=True,
+            )
         except asyncio.TimeoutError:
             raise HTTPException(status_code=504, detail="Request timed out.")
         except PlaywrightTimeoutError:
@@ -503,7 +551,7 @@ def build_app(
             resp_headers["X-Session-Id"] = x_session_id
 
         if body.stream:
-            print(f"[server] Streaming /v1/completions ({len(response_text)} chars).", flush=True)
+            _log(f"[server] Streaming /v1/completions ({len(response_text)} chars).", flush=True)
             return StreamingResponse(
                 _stream_completion(response_text, chunk_id, created),
                 media_type="text/event-stream",
@@ -515,7 +563,7 @@ def build_app(
             "object": "text_completion",
             "created": created,
             "model": MODEL_ID,
-            "choices": [{"index": 0, "text": response_text,  # TRUE scraped content
+            "choices": [{"index": 0, "text": response_text,
                          "finish_reason": "stop", "logprobs": None}],
             "usage": {"prompt_tokens": prompt_tokens,
                       "completion_tokens": completion_tokens,

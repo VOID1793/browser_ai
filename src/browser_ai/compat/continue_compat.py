@@ -78,15 +78,11 @@ class ContinueCompat:
 
     def process_user_message(self, user_content: str) -> str:
         """
-        Apply Continue-specific prompt transformations to a user message.
+        Apply Continue-specific prompt transformations.
 
-        Currently:
-          - Reorders code-context blocks so the instruction comes first.
-          - Appends a markdown-wrap instruction for document requests.
-
-        This method is a thin wrapper around prompt.reorder_user_message so
-        that the logic remains testable in isolation while still being
-        opt-in via the compat layer.
+        reorder_user_message() is now applied inside build_incremental_prompt()
+        on the raw user message before system-prefix assembly.  This method
+        is kept as an extension point for any future Continue-specific
+        transformations that cannot be handled generically.
         """
-        from browser_ai.prompt import reorder_user_message
-        return reorder_user_message(user_content)
+        return user_content

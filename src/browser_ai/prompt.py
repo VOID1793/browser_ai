@@ -5,6 +5,14 @@ Prompt construction, conversation history tracking, and message normalisation.
 
 None of these functions perform I/O — they are pure transformations of text
 and message lists.
+
+Reorder contract
+----------------
+reorder_user_message() must only ever be called on a RAW user message string,
+never on an assembled prompt that already has a system-instructions prefix.
+build_incremental_prompt() applies it internally to the latest_user content
+before assembling the final prompt, so callers (the server) must NOT call it
+again after the fact.
 """
 
 from __future__ import annotations
@@ -107,57 +115,100 @@ _WRAP_INSTRUCTION = (
 
 
 def _is_markdown_doc_request(text: str) -> bool:
+    """
+    Return True only for explicit requests to CREATE a markdown document.
+
+    Intentionally narrow: referencing a README or .md file in context does
+    NOT qualify.  The request itself must use language like "write a README",
+    "generate documentation", "create a .md file", etc.
+    """
     lowered = text.lower()
-    return any(hint in lowered for hint in MARKDOWN_DOC_HINTS)
+    # Must contain an action verb + a document-type hint on the same line,
+    # or be an explicit "write/create/generate doc" phrase.
+    ACTION_HINTS = frozenset({
+        "write a readme", "write readme", "create a readme", "generate readme",
+        "write a doc", "create a doc", "generate doc", "write doc",
+        "write documentation", "create documentation", "generate documentation",
+        "write a .md", "create a .md", "generate a .md",
+        "write markdown", "create markdown", "generate markdown",
+    })
+    return any(hint in lowered for hint in ACTION_HINTS)
 
 
 def reorder_user_message(user_content: str) -> str:
     """
-    Reorder a user message that embeds a large code block before the instruction.
+    Reorder a user message that embeds a file block before the instruction.
 
     Continue and similar IDE extensions produce messages shaped like:
 
-        ```lang path/to/file (lines)
-        <file contents — often 40k+ chars>
+        ```lang path/to/file (lines N-M)
+        <file contents — may contain inner fenced blocks>
         ```
         <actual user instruction>
 
-    Because the code block dominates, the LLM often ignores the instruction.
+    Because the file block dominates, the LLM often ignores the instruction.
     This function moves the instruction to the front:
 
         <actual instruction>
 
-        Here is the relevant code context:
-        ```lang path/to/file
+        Here is the relevant file context:
+        ```lang path/to/file (lines N-M)
         <file contents>
         ```
 
-    If the instruction looks like a request for a markdown document, a wrap
-    instruction is appended so the response can be extracted as raw markdown.
+    This function MUST only be called on the raw user message string, not on
+    an assembled prompt that already has system-instruction text prepended.
 
-    If no code fence is present or the trailing instruction is too short,
-    the content is returned unchanged (possibly with the wrap instruction).
+    Algorithm:
+      - The FIRST line that starts with ``` is the outer opener.
+      - The outer closer is the LAST line that is exactly ``` (nothing after).
+        This works because inner closing fences are always followed by more
+        content, while the outer closer is the final ``` in the message.
+      - Everything after the outer closer is the instruction.
+      - Requires at least 3 words of instruction to avoid spurious reordering.
+
+    The markdown-wrap instruction is appended only for explicit doc-creation
+    requests, not for queries that merely reference a markdown file.
     """
     content = user_content.strip()
+    lines = content.splitlines()
 
-    last_fence_end = content.rfind("\n```")
-    if last_fence_end == -1:
+    # Find the first line that opens a fenced block (starts with ```)
+    opener_idx = None
+    for i, line in enumerate(lines):
+        if line.strip().startswith("```"):
+            opener_idx = i
+            break
+
+    if opener_idx is None:
         if _is_markdown_doc_request(content):
             return content + _WRAP_INSTRUCTION
         return content
 
-    after_fence = content[last_fence_end + 4:].strip()
+    # Find the LAST line that is a bare closing fence (exactly ```)
+    # This is the outer block's closer regardless of inner fences.
+    closer_idx = None
+    for i in range(len(lines) - 1, opener_idx, -1):
+        if lines[i].strip() == "```":
+            closer_idx = i
+            break
 
-    if len(after_fence) < 10:
+    if closer_idx is None or closer_idx <= opener_idx:
         return content
 
-    code_block = content[: last_fence_end + 4].strip()
-    instruction = after_fence
+    # Everything after the closer is the instruction
+    instruction = "\n".join(lines[closer_idx + 1:]).strip()
+
+    # Require at least 3 words of meaningful instruction
+    if len(instruction.split()) < 3:
+        return content
+
+    code_block = "\n".join(lines[opener_idx : closer_idx + 1])
 
     if _is_markdown_doc_request(instruction):
         instruction = instruction + _WRAP_INSTRUCTION
 
-    return f"{instruction}\n\nHere is the relevant code context:\n\n{code_block}"
+    return f"{instruction}\n\nHere is the relevant file context:\n\n{code_block}"
 
 
 def build_transcript_prompt(messages: List[Dict[str, str]]) -> str:
@@ -213,6 +264,10 @@ def build_incremental_prompt(
 
     Returns: (prompt_string, reset_required)
 
+    reorder_user_message() is applied to the raw latest_user content BEFORE
+    the system-instructions prefix is prepended.  Callers must NOT call it
+    again on the assembled result.
+
     Strategy:
       - No previous history → first turn; fold system messages + latest user.
       - Identical history  → resend latest user (defensive fallback).
@@ -239,6 +294,7 @@ def build_incremental_prompt(
         if not latest_user:
             return build_transcript_prompt(current_messages), False
 
+        # Apply reorder to the raw user message BEFORE prepending system text.
         latest_user = reorder_user_message(latest_user)
 
         if system_parts:
@@ -256,7 +312,7 @@ def build_incremental_prompt(
     if previous_messages == current_messages:
         for m in reversed(current_messages):
             if m["role"] == "user" and m["content"].strip():
-                return m["content"].strip(), False
+                return reorder_user_message(m["content"].strip()), False
         return build_transcript_prompt(current_messages), False
 
     # ── Exact prefix extension ────────────────────────────────────────────────
@@ -270,12 +326,10 @@ def build_incremental_prompt(
             return build_transcript_prompt(current_messages), True
         for m in reversed(delta):
             if m["role"] == "user" and m["content"].strip():
-                return m["content"].strip(), False
+                return reorder_user_message(m["content"].strip()), False
         return build_transcript_prompt(current_messages), True
 
     # ── Soft prefix match (system message swap) ───────────────────────────────
-    # Handles Continue switching from chat → agent mode, which prepends a
-    # different system message and shifts all other indices by 1.
     def _strip_system(msgs: List[Dict[str, str]]) -> List[Dict[str, str]]:
         return [m for m in msgs if m["role"] not in {"system", "developer"}]
 
@@ -291,8 +345,8 @@ def build_incremental_prompt(
             return build_transcript_prompt(current_messages), True
         for m in reversed(delta):
             if m["role"] == "user" and m["content"].strip():
-                print("[prompt] Soft prefix match (system msg swap) — sending delta only.", flush=True)
-                return m["content"].strip(), False
+                print("[prompt] Soft prefix match — sending delta only.", flush=True)
+                return reorder_user_message(m["content"].strip()), False
         return build_transcript_prompt(current_messages), True
 
     # ── Diverged ──────────────────────────────────────────────────────────────

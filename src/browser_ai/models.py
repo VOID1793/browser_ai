@@ -44,6 +44,13 @@ class ChatCompletionRequest(BaseModel):
     # "auto" | "none" | {"type": "function", "function": {"name": "..."}}
     # Accepted and stored but not enforced — the backend decides whether to call tools.
     tool_choice: Optional[Any] = None
+    # Accepted and ignored — browsers don't support stop sequences natively.
+    stop: Optional[Any] = None
+    top_p: Optional[float] = None
+    frequency_penalty: Optional[float] = None
+    presence_penalty: Optional[float] = None
+    n: Optional[int] = None
+    logit_bias: Optional[Dict[str, Any]] = None
 
 
 class CompletionRequest(BaseModel):
@@ -55,6 +62,8 @@ class CompletionRequest(BaseModel):
     stream: Optional[bool] = False
     user: Optional[str] = None
     suffix: Optional[str] = None        # present in some edit-mode payloads; ignored
+    stop: Optional[Any] = None
+    top_p: Optional[float] = None
 
 
 # ── Outbound ──────────────────────────────────────────────────────────────────

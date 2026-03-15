@@ -10,7 +10,7 @@ from browser_ai.backends.perplexity import PerplexityBackend
 REGISTRY: dict[str, Type[BrowserBackend]] = {
     "gemini": GeminiBackend,
     "chatgpt": ChatGPTBackend,
-    "perplexity": PerplexityBackend,
+    "perplexity": PerplexityBackend
 }
 
 

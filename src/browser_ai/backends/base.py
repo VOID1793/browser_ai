@@ -26,12 +26,15 @@ Layer 2 — BaseBrowserBackend (Shared Machinery)
       - GENERATING_SELECTORS list[str]    selectors visible while generating
       - CONSENT_SELECTORS    list[str]    selectors for consent dialogs (optional)
 
-    Backends may override any method for UI-specific behaviour, but most
-    will not need to.
+    Optional class-level overrides:
+      - DEFAULT_HEADLESS     bool         per-backend headless default (True)
+      - MINIMIZE_WINDOW      bool         minimize the window after launch (False)
+                                          Only meaningful when headless=False.
+      - EXTRA_LAUNCH_ARGS    list[str]    additional Chromium launch args
 
 Adding a new backend
 --------------------
-1. Create browser_ai/backends/<name>.py
+1. Create browser_ai/backends/<n>.py
 2. Subclass BaseBrowserBackend
 3. Set the class-level selector attributes above
 4. Register in browser_ai/backends/__init__.py
@@ -43,7 +46,7 @@ from __future__ import annotations
 import asyncio
 import time
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 
 from playwright.async_api import async_playwright
 
@@ -71,6 +74,11 @@ class BrowserBackend(ABC):
 
     #: Short name used in log messages, the model card, and the CLI.
     label: str = "base"
+
+    #: Per-backend headless default.  Overridden by the CLI --headless /
+    #: --no-headless flags at runtime.  Set to False for backends (e.g.
+    #: ChatGPT) that don't work reliably in headless Chromium.
+    DEFAULT_HEADLESS: bool = True
 
     @abstractmethod
     async def start(self) -> None:
@@ -131,10 +139,28 @@ class BaseBrowserBackend(BrowserBackend):
     GENERATING_SELECTORS: List[str] = []
     CONSENT_SELECTORS: List[str] = []
 
+    # ── Subclasses may override these ─────────────────────────────────────────
+
+    DEFAULT_HEADLESS: bool = True
+
+    # When True the browser window is launched visible but immediately
+    # minimized.  This side-steps headless detection while keeping the window
+    # out of the user's way.  Only takes effect when headless=False.
+    MINIMIZE_WINDOW: bool = False
+
+    # Additional Chromium launch args appended to the shared baseline set.
+    # Backends that need special flags (e.g. --window-position) add them here.
+    EXTRA_LAUNCH_ARGS: List[str] = []
+
     # ── Internal state ────────────────────────────────────────────────────────
 
-    def __init__(self, headless: bool = True) -> None:
-        self.headless = headless
+    def __init__(self, headless: Optional[bool] = None) -> None:
+        # None → use the backend's own DEFAULT_HEADLESS preference.
+        # Explicit True/False → CLI override wins.
+        if headless is None:
+            self.headless = self.DEFAULT_HEADLESS
+        else:
+            self.headless = headless
         self._playwright = None
         self._browser = None
         self._context = None
@@ -157,14 +183,23 @@ class BaseBrowserBackend(BrowserBackend):
             if self._started and self._page is not None:
                 return
 
-            print(f"[{self.label}] Launching Chromium...", flush=True)
+            mode = "headless" if self.headless else (
+                "minimized" if self.MINIMIZE_WINDOW else "visible"
+            )
+            print(f"[{self.label}] Launching Chromium ({mode})...", flush=True)
+
             self._playwright = await async_playwright().start()
+
+            launch_args = [
+                "--no-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--disable-dev-shm-usage",
+            ] + self.EXTRA_LAUNCH_ARGS
+
             self._browser = await self._playwright.chromium.launch(
                 headless=self.headless,
-                args=[
-                    "--no-sandbox",
-                    "--disable-blink-features=AutomationControlled",
-                ],
+                args=launch_args,
             )
             self._context = await self._browser.new_context(
                 viewport={"width": 1280, "height": 900},

@@ -13,6 +13,10 @@ LAUNCH_TIMEOUT_MS: int = 30_000
 RESPONSE_TIMEOUT_MS: int = 180_000     # 3 min — large file-context responses can be slow
 POLL_INTERVAL_S: float = 0.8
 STABLE_READS: int = 3
+
+# Default headless mode.  Individual backends may override this via their
+# DEFAULT_HEADLESS class attribute (e.g. ChatGPT forces visible+minimized).
+# The CLI --headless / --no-headless flags override both.
 HEADLESS: bool = True
 
 # Prompts longer than this are delivered via clipboard paste (Ctrl+V) instead
@@ -43,6 +47,10 @@ JUNK_LINES: frozenset[str] = frozenset({
     "report a problem",
     "show drafts",
     "hide drafts",
+    # Gemini code block UI labels
+    "code snippet",
+    "run in google colab",
+    "use code with caution",
 })
 
 # ── Tool calling ──────────────────────────────────────────────────────────────

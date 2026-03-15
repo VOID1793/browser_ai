@@ -20,20 +20,118 @@ from browser_ai.config import JUNK_LINES
 
 def unwrap_markdown_fence(text: str) -> str:
     """
-    Strip an outer ```markdown ... ``` wrapper that the server asked the LLM
-    to produce so raw markdown can be returned without browser-rendering artefacts.
+    Strip an outer ```markdown / ```md wrapper added by the LLM in response
+    to an explicit _WRAP_INSTRUCTION request.
 
-    Handles ```markdown, ```md, and plain ``` openers.
-    Returns the text unchanged if no matching outer fence is found.
+    Only unwraps ```markdown and ```md openers — never a bare ``` opener.
+    Bare ``` at the start of a response is legitimate content (e.g. a code
+    block is the first thing in the reply) and must not be stripped.
+
+    Tracks fence nesting depth so that inner code blocks (``` inside the
+    wrapped content) do not prematurely terminate the unwrap.  The outer
+    closer is the ``` that brings the depth back to zero.
+
+    Returns the text unchanged if no recognised opener is found, if the
+    opener is unclosed, or if the extracted content is empty.
     """
     text = text.strip()
-    for open_tag in ("```markdown", "```md", "```"):
-        if text.startswith(open_tag):
-            inner = text[len(open_tag):]
-            last = inner.rfind("```")
-            if last != -1:
-                return inner[:last].strip()
+    for open_tag in ("```markdown", "```md"):
+        if not text.startswith(open_tag):
+            continue
+        rest = text[len(open_tag):]
+        first_newline = rest.find('\n')
+        if first_newline == -1:
+            return text  # malformed — no newline after opener
+        content_start = first_newline + 1
+        lines = rest[content_start:].splitlines()
+        # depth=1 because we are inside the outer opener.
+        # Any line starting with ``` that is NOT a closer (has chars after)
+        # opens a new inner block (depth+1).  A bare ``` line closes one
+        # level (depth-1).  When depth reaches 0 we have the outer closer.
+        depth = 1
+        collected: List[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped == "```":
+                depth -= 1
+                if depth == 0:
+                    inner = "\n".join(collected).strip()
+                    return inner if inner else text
+                collected.append(line)
+            elif stripped.startswith("```") and len(stripped) > 3:
+                depth += 1
+                collected.append(line)
+            else:
+                collected.append(line)
+        return text  # unclosed
     return text
+
+
+def strip_edit_response(text: str) -> str:
+    """
+    Extract the replacement content from an edit-mode response.
+
+    Continue's /v1/completions (edit mode) inserts the response verbatim into
+    the user's file.  LLMs frequently wrap their edit in a fenced code block,
+    and may also add a heading, preamble, or trailing explanation around it.
+    None of that surrounding text belongs in the file.
+
+    Strategy:
+      1. If the response contains a fenced code block, return only the content
+         of the FIRST such block.  This handles:
+           - Bare response:   ```\ncontent\n```                    → content
+           - With heading:    ## Title\n```lang\ncontent\n```\n    → content
+           - With preamble:   Here is the update:\n```\ncontent\n``` → content
+           - Leaked UI label: Markdown\n```mermaid\ncontent\n```   → content
+             (single-word non-sentence line before the fence is treated as
+             a leaked language/file-type label from the browser UI, not prose)
+      2. If no fence is found, return the full response unchanged.
+
+    Uses depth tracking so inner code blocks within the first block are
+    preserved (e.g. a markdown block containing a mermaid diagram).
+    """
+    text = text.strip()
+    if not text:
+        return text
+
+    lines = text.splitlines()
+
+    # Find the first line that opens a fenced code block
+    opener_idx = None
+    for i, line in enumerate(lines):
+        if line.strip().startswith("```"):
+            opener_idx = i
+            break
+
+    if opener_idx is None:
+        return text  # no fence — plain text replacement
+
+    # Check whether everything before the opener is "meaningful prose" or
+    # just a leaked UI label.  A leaked label is: a single short word with no
+    # spaces (e.g. "Markdown", "Python", "markdown") on its own line.
+    # Real prose (headings, sentences, multi-line preambles) still qualifies
+    # as meaningful and we still discard it to extract only the code content.
+    # The key insight for edit mode: we ALWAYS want just the code block content,
+    # regardless of what surrounds it.
+
+    # Collect content inside the first fence block using depth tracking.
+    depth = 1
+    collected: List[str] = []
+    for line in lines[opener_idx + 1:]:
+        stripped = line.strip()
+        if stripped == "```":
+            depth -= 1
+            if depth == 0:
+                break  # outer closer — stop, discard everything after
+            collected.append(line)
+        elif stripped.startswith("```") and len(stripped) > 3:
+            depth += 1
+            collected.append(line)
+        else:
+            collected.append(line)
+
+    inner = "\n".join(collected).strip()
+    return inner if inner else text
 
 
 def clean_response_text(raw: str) -> str:
@@ -100,27 +198,35 @@ _EXTRACT_JS = """
     }
 
     function getLangForPre(pre) {
+        // Prefer explicit data attributes set by the UI framework.
         if (pre.dataset && pre.dataset.lang) return pre.dataset.lang.toLowerCase();
         const parent = pre.parentElement;
         if (parent && parent.dataset && parent.dataset.lang)
             return parent.dataset.lang.toLowerCase();
+
+        // CSS language class on the inner <code> element (e.g. language-python).
         const codeEl = pre.querySelector('code');
         if (codeEl) {
             for (const cls of codeEl.classList)
                 if (cls.startsWith('language-')) return cls.slice(9).toLowerCase();
         }
-        let sib = pre.previousSibling;
-        while (sib) {
-            const t = sib.textContent ? sib.textContent.trim() : '';
-            if (t) return t.toLowerCase();
-            sib = sib.previousSibling;
-        }
+
+        // Dedicated language-label element in the parent container.
+        // Only accept it if the text looks like a real language tag:
+        // a single token, no spaces, reasonable length.
         if (parent) {
             const labelEl = parent.querySelector(
                 '.code-block-decoration, .language-label, [class*="lang"]'
             );
-            if (labelEl) return labelEl.textContent.trim().toLowerCase();
+            if (labelEl) {
+                const t = labelEl.textContent.trim();
+                if (t && !t.includes(' ') && t.length <= 20)
+                    return t.toLowerCase();
+            }
         }
+
+        // Do NOT fall back to previous-sibling text content — UI labels like
+        // "Code snippet" or "Copy" will be misidentified as language tags.
         return '';
     }
 

@@ -69,6 +69,10 @@ class SessionState:
 
 # ── Session manager ───────────────────────────────────────────────────────────
 
+# How long to wait for a single browser session to close during shutdown.
+_CLOSE_TIMEOUT_S = 10
+
+
 class SessionManager:
     """
     Manages a pool of browser sessions, one per unique session key.
@@ -83,10 +87,10 @@ class SessionManager:
     def __init__(
         self,
         backend_class: Type[BrowserBackend],
-        headless: bool = True,
+        headless=None,
     ) -> None:
         self.backend_class = backend_class
-        self.headless = headless
+        self.headless = headless  # None = use backend's DEFAULT_HEADLESS
         self._sessions: Dict[str, SessionState] = {}
         self._lock = asyncio.Lock()
         self._cleanup_task: Optional[asyncio.Task] = None
@@ -106,16 +110,15 @@ class SessionManager:
             self._cleanup_task.cancel()
             try:
                 await self._cleanup_task
-            except Exception:
+            except (asyncio.CancelledError, Exception):
+                # CancelledError is BaseException in Python 3.8+; catch both.
                 pass
 
         async with self._lock:
             sessions = list(self._sessions.values())
             self._sessions.clear()
 
-        for state in sessions:
-            await state.browser.close()
-
+        await _close_all(sessions)
         print("[session_manager] Shutdown complete.", flush=True)
 
     async def get_or_create(
@@ -147,6 +150,10 @@ class SessionManager:
             state.last_used_at = time.time()
             return state
 
+    def session_count(self) -> int:
+        """Return the number of currently active sessions."""
+        return len(self._sessions)
+
     async def reset(self, session_key: str) -> SessionState:
         """Close and remove an existing session, then create a fresh one."""
         print(
@@ -157,7 +164,7 @@ class SessionManager:
             old = self._sessions.pop(session_key, None)
 
         if old:
-            await old.browser.close()
+            await _close_one(old)
 
         browser = self.backend_class(headless=self.headless)
         state = SessionState(session_id=session_key, browser=browser)
@@ -186,5 +193,36 @@ class SessionManager:
                     )
                     stale.append(self._sessions.pop(key))
 
-            for state in stale:
-                await state.browser.close()
+            await _close_all(stale)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+async def _close_one(state: SessionState) -> None:
+    """
+    Close a single browser session with a timeout.
+
+    Playwright can block indefinitely if the browser process has already been
+    killed (e.g. during OS shutdown or Ctrl+C).  The timeout ensures we never
+    hang waiting for a dead process.
+    """
+    try:
+        await asyncio.wait_for(state.browser.close(), timeout=_CLOSE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        print(
+            f"[session_manager] Timed out closing session {state.session_id[:12]}; "
+            "browser process may have already exited.",
+            flush=True,
+        )
+    except Exception as exc:
+        # Swallow "Connection closed" and similar Playwright teardown noise.
+        print(
+            f"[session_manager] Error closing session {state.session_id[:12]}: {exc}",
+            flush=True,
+        )
+
+
+async def _close_all(sessions: List[SessionState]) -> None:
+    """Close multiple sessions concurrently."""
+    if sessions:
+        await asyncio.gather(*(_close_one(s) for s in sessions))

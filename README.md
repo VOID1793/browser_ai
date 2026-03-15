@@ -1,4 +1,4 @@
-# 🌐 Browser_Ai V0.6
+# 🌐 Browser_Ai V0.8
 
 **Browser_Ai is an asynchronous, Playwright-backed automation bridge that transforms public AI ChatBot web interfaces into a local OpenAI-compatible API server.**
 
@@ -8,15 +8,20 @@
 >**DISCLAIMER: All tools in use for Browser_Ai are publicly available, openly sourced, tools are are beholden to their respective license agreements. All LLM interfaces accessed by Playwright are to be used in accordance with their respective Terms of Service, and with respect to relevant regulations. Use Browser_Ai at your own discretion.**
 ---
 
-## Current Support
+## Supported backends
+ 
+| Backend    | Status        | Default mode        | URL                              |
+|------------|---------------|---------------------|----------------------------------|
+| `gemini`   | ✓ working     | headless            | https://gemini.google.com/app    |
+| `chatgpt`  | ✓ working     | visible + minimized | https://chatgpt.com              |
+| `perplexity` | stub only   | headless            | https://www.perplexity.ai        |
 
-* Continue VSCode AI-powered extension features:
-    * File Creation
-    * File Editing
-    * File Context Chatting
-    * Sidecar Chat
-* Free and Ephemeral (Non-Signed-In LLM Sessions) with:
-    * Google Gemini Flash
+> **Why does ChatGPT run in a visible window?**  
+> ChatGPT reliably detects headless Chromium and degrades the session — either
+> serving a stripped DOM or silently blocking responses. The only reliable fix
+> is a real browser window. `browser_ai` automatically minimizes it so it
+> stays out of your way. You'll see a brief flash when the window opens, then
+> it moves off-screen. Use `--no-headless` to keep it visible for debugging.
 
 ## Coming Soon
 
@@ -25,7 +30,6 @@
 * Multi-port serving
 * Dockerized Deployment
 * Free and Ephemeral (Non-Signed-In LLM Sessions) with:
-    * ChatGPT
     * Perplexity
 
 ## ✨ Key Features
@@ -39,30 +43,40 @@
 
 ## Example Architecture for Basic Chat
 
-```plaintext
-       [ LLM Client ]           [ GeminiBackend ]             [ Playwright/Browser ]         [ Gemini Web UI ]
-      (e.g., Continue)      (gemini.py Selectors)          (Targeting CSS DOM)         (gemini.google.com)
-             |                        |                             |                           |
-             |--- 1. POST Prompt ---->|                             |                           |
-             |                        |-- 2. Check CONSENT_SELECTORS|                           |
-             |                        |   ("Accept all" / "I agree")|                           |
-             |                        |---------------------------->|----- 3. Clear Dialogs --->|
-             |                        |                             |                           |
-             |                        |-- 4. Find INPUT_SELECTORS --|                           |
-             |                        |   (rich-textarea[content])  |                           |
-             |                        |---------------------------->|---- 5. Focus & Type ----->|
-             |                        |                             |                           |
-             |                        |-- 6. Find SEND_SELECTORS ---|                           |
-             |                        |   (button[aria-label=Send]) |                           |
-             |                        |---------------------------->|---- 7. Click Send ------->|
-             |                        |                             |                           |
-             |                        |                             | <--- 8. Rendering Mat-Spinner
-             |                        |-- 9. Poll GENERATING_SEL. --|                           |
-             |                        |   (Wait for spinner to hide)|                           |
-             |                        |                             | <--- 10. <model-response> |
-             |                        |-- 11. Extract RESPONSE_SEL -|          populated        |
-             |                        |    (Scrape text from DOM)   |                           |
-             |<--- 12. Final Text ----|                             |                           |
+```markdown
+LLM Client (e.g., Continue)
+        │
+        │ 1. Send Prompt
+        ▼
+GeminiBackend (gemini.py Selectors)
+        │
+        │ 2. Handle Consent Popups (Accept/I Agree)
+        │
+        │ 3. Clear Previous Dialogs
+        │
+        │ 4. Locate Input Field
+        ▼
+Playwright/Browser (Targeting DOM)
+        │
+        │ 5. Focus & Type Prompt
+        │
+        │ 6. Locate Send Button
+        │
+        │ 7. Click Send
+        │
+        │ 8. Wait for Loading / Spinner
+        ▼
+Gemini Web UI (gemini.google.com)
+        │
+        │ 9. Generate Model Response
+        │
+        │ 10. Response Rendered in DOM
+        ▼
+        │ 11. Extract Response Text
+        │
+        │ 12. Return Final Text
+        │
+LLM Client Receives Response
 ```
 
 ## 🛠 Prerequisites
@@ -72,50 +86,153 @@
 
 ## 📦 Installation
 
-### Clone the Repository
 ```bash
-git clone https://github.com/VOID1793/browser_ai.git
-cd browser_ai
-```
-
-### Install Dependencies
-
-```Bash
-pip3 install -e ./browser_ai/src
+# Clone
+git clone https://github.com/VOID1793/browser_ai
+cd browser_ai/src
+ 
+# Install (inside a venv is recommended)
+pip install -e .
+ 
+# Install Playwright's Chromium browser
 playwright install chromium
 ```
 
 ## 🚀 Usage
 
-### 1. Start the API Server
+## Quick start
+ 
+```bash
+# Gemini (headless — recommended default)
+browser-ai serve --backend gemini --compat continue
+ 
+# ChatGPT (opens a minimized browser window automatically)
+browser-ai serve --backend chatgpt --compat continue
 
-Run the server to provide an OpenAI-compatible endpoint at `http://localhost:8000`.
-
-```Bash
-browser-ai serve --backend gemini (--visible optional to have interactive browser open)
-```
-
-### 2. Interactive CLI
-
-You can also chat directly with the backend in your terminal:
-
-```Bash
+# You can also chat directly with the backend in your terminal
 browser-ai chat --backend gemini "<your prompt here>"
+ 
+# See all options
+browser-ai serve --help
+browser-ai backends
 ```
 
 ### 3. Integration
+ 
+Add to your `~/.continue/config.yaml`:
+ 
+```yaml
+models:
+  - name: Gemini Browser
+    provider: openai
+    apiBase: http://127.0.0.1:8000/v1
+    model: browser-ai
+    apiKey: not-needed
+    roles:
+      - chat
+      - edit
+ 
+  - name: ChatGPT Browser
+    provider: openai
+    apiBase: http://127.0.0.1:8000/v1
+    model: browser-ai
+    apiKey: not-needed
+    roles:
+      - chat
+      - edit
+```
 
-Point your favorite LLM client (e.g. Continue) to:
+> **Important:** The model name **must** be `browser-ai`. The server advertises
+> this name in `/v1/models` and echoes it in responses. Continue drops
+> responses where the echoed model doesn't match the config.
 
-- Base URL: `http://localhost:8000/v1`
-- Model: `gemini` [Currently Implemented]
+## CLI reference
+ 
+```
+browser-ai serve [--backend {gemini,chatgpt,perplexity}]
+                 [--compat {continue}]
+                 [--host HOST] [--port PORT]
+                 [--headless | --no-headless]
+ 
+browser-ai chat  [--backend {gemini,chatgpt,perplexity}]
+                 [--headless | --no-headless]
+                 [--session]
+                 [PROMPT]
+ 
+browser-ai backends
+```
 
+### Headless flags
+ 
+| Flag | Effect |
+|------|--------|
+| *(none)* | Uses the backend's default (`gemini` → headless, `chatgpt` → visible+minimized) |
+| `--no-headless` | Force a visible browser window (useful for first-time login / debugging) |
+| `--headless` | Force headless mode (may not work for all backends) |
+ 
+---
+ 
+## Smoke test
+ 
+```bash
+curl -s http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test" \
+  -H "X-Session-Id: smoke-test" \
+  -d '{"model":"browser-ai","messages":[{"role":"user","content":"What is 2+2?"}],"stream":false}' \
+  | python3 -m json.tool
+```
+ 
+Expected: `choices[0].message.content` contains a response.
+ 
+---
 ## 🛠 Project Structure
 
-- `browser_ai/src/backends/`: Contains the browser automation logic for different LLMs (e.g. Gemini)
-- `browser_ai/src/browser_ai/server.py`: FastAPI implementation of the OpenAI-compatible API.
-- `browser_ai/src/browser_ai/cli.py`: Command-line interface logic.
-- `browser_ai/src/pyproject.toml`: Project dependencies and entry points.
+```
+browser_ai/src/
+├── pyproject.toml
+└── browser_ai/
+    ├── config.py            # Global tunables
+    ├── models.py            # Pydantic request/response models
+    ├── cleaning.py          # Response text cleaning + DOM text extraction
+    ├── prompt.py            # Prompt construction + history tracking
+    ├── tools.py             # Tool call serialization / extraction / rescue
+    ├── session.py           # SessionState + SessionManager
+    ├── server.py            # FastAPI app + all routes
+    ├── cli.py               # browser-ai CLI entry point
+    ├── backends/
+    │   ├── base.py          # BrowserBackend ABC + BaseBrowserBackend
+    │   ├── gemini.py        # ✓ working
+    │   ├── chatgpt.py       # ✓ working (visible+minimized)
+    │   └── perplexity.py    # stub
+    └── compat/
+        └── continue_compat.py   # Continue-specific patches
+```
+### Adding a new backend
+ 
+1. Create `browser_ai/backends/<name>.py`
+2. Subclass `BaseBrowserBackend`
+3. Set `label`, `URL`, and the four selector lists
+4. Optionally set `DEFAULT_HEADLESS = False` + `MINIMIZE_WINDOW = True` if the site detects headless
+5. Register in `browser_ai/backends/__init__.py`
+6. Add to `--backend` choices in `cli.py`
+ 
+---
+ 
+## Session management
+ 
+Sessions are keyed by a hash of `(Authorization header, X-Session-Id header, user field)`. Different callers get isolated browser tabs automatically. Sessions expire after 30 minutes of idle time.
+ 
+To force a session reset from a client, send `X-Reset-Session: 1`.
+ 
+---
+ 
+## Known limitations
+ 
+- **No authentication passthrough** — sessions are always anonymous (logged-out) by design.
+- **No parallel requests per session** — each browser tab handles one request at a time. Multiple concurrent callers each get their own tab.
+- **Token counts are estimates** — the usage field returns heuristic char/4 estimates, not real token counts.
+
 ## 📜 License
 
 ### MIT

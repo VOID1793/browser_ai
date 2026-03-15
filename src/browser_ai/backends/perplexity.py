@@ -10,22 +10,22 @@ and registry without import errors.
 
 Implementation notes for contributors
 --------------------------------------
-1. TARGET_URL = "https://www.perplexity.ai"
+1. URL = "https://www.perplexity.ai"
 2. Login: Perplexity supports anonymous use but rate-limits aggressively.
-   A logged-in session (Google or email) is strongly recommended. Use
-   --visible on first run to authenticate.
-3. Input selector: a textarea or contenteditable div in the search/ask bar.
-   The element ID or placeholder text ("Ask anything...") can be used as
-   a reliable selector anchor.
-4. Submit: Enter key or a submit button (magnifying glass / arrow icon).
-5. Response container: Perplexity streams responses into a div with a class
-   like "prose" or "answer". Wait for the copy button to appear as a signal
+   A logged-in session (Google or email) is recommended.  Use --no-headless
+   on first run to authenticate.
+3. Input selector: a textarea or contenteditable div in the ask bar.
+   The placeholder text ("Ask anything...") is a reliable selector anchor.
+4. Submit: Enter key or a submit button (arrow icon).
+5. Response container: Perplexity streams into a div with a class like
+   "prose" or "answer". The copy button appearing is a reliable signal
    that generation is complete.
-6. Note: Perplexity's responses include citations/sources. The extraction
-   logic should consider stripping or preserving these depending on use case.
+6. Perplexity responses include citation links.  Consider stripping them
+   in a custom extract_clean_response_text override.
 """
 
 from __future__ import annotations
+from typing import Optional
 
 from browser_ai.backends.base import BrowserBackend
 
@@ -39,9 +39,12 @@ class PerplexityBackend(BrowserBackend):
     """Browser backend stub for Perplexity AI."""
 
     label: str = "perplexity"
+    DEFAULT_HEADLESS: bool = True
 
-    def __init__(self, headless: bool = True) -> None:
-        self.headless = headless
+    def __init__(self, headless: Optional[bool] = None) -> None:
+        # headless argument accepted for API compatibility; ignored since
+        # this backend raises NotImplementedError before ever launching.
+        self.headless = headless if headless is not None else self.DEFAULT_HEADLESS
 
     async def start(self) -> None:
         raise NotImplementedError(_NOT_IMPLEMENTED_MSG)
