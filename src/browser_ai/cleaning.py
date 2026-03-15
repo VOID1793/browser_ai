@@ -77,61 +77,59 @@ def strip_edit_response(text: str) -> str:
     None of that surrounding text belongs in the file.
 
     Strategy:
-      1. If the response contains a fenced code block, return only the content
-         of the FIRST such block.  This handles:
-           - Bare response:   ```\ncontent\n```                    → content
-           - With heading:    ## Title\n```lang\ncontent\n```\n    → content
-           - With preamble:   Here is the update:\n```\ncontent\n``` → content
-           - Leaked UI label: Markdown\n```mermaid\ncontent\n```   → content
-             (single-word non-sentence line before the fence is treated as
-             a leaked language/file-type label from the browser UI, not prose)
-      2. If no fence is found, return the full response unchanged.
+      1. Use ``re.MULTILINE`` with a ``^``-anchored pattern to locate the
+         first fenced code block opener (`` ``` `` optionally followed by a
+         language tag) that appears at the true start of a line.  This is
+         immune to invisible-character and mixed-line-ending artefacts
+         (``\\r\\n``, stray ``\\r``, Unicode spaces) that caused the previous
+         line-by-line depth-tracker to silently fail at runtime.
+      2. Once the opener is found, collect everything until the *last* bare
+         `` ``` `` closer that appears at the start of a line.  Using the last
+         closer (rather than the first) correctly preserves nested fences,
+         e.g. a ``markdown`` block that wraps an inner ``python`` block.
+      3. If the opener is found but no closer follows, return the raw text
+         unchanged rather than returning an empty string.
+      4. If no fenced block is present at all, return the raw text unchanged
+         (the response may legitimately be plain-text replacement content).
 
-    Uses depth tracking so inner code blocks within the first block are
-    preserved (e.g. a markdown block containing a mermaid diagram).
+    Handles all preamble forms without special-casing them:
+      - Bare response:     `` ``` ``\\ncontent\\n`` ``` ``               → content
+      - With heading:      ``## Title``\\n`` ```lang ``\\ncontent\\n`` ``` `` → content
+      - With preamble:     ``Here is the update:``\\n`` ``` ``\\n…       → content
+      - Leaked UI label:   ``Markdown``\\n`` ```mermaid ``\\ncontent\\n`` ``` `` → content
+      - Nested fences:     `` ```markdown ``\\n…`` ```python ``\\n…`` ``` ``\\n…`` ``` `` → full inner content
     """
     text = text.strip()
     if not text:
         return text
 
-    lines = text.splitlines()
-
-    # Find the first line that opens a fenced code block
-    opener_idx = None
-    for i, line in enumerate(lines):
-        if line.strip().startswith("```"):
-            opener_idx = i
-            break
-
-    if opener_idx is None:
+    # Locate the first opener: ``` followed by an optional language tag, then
+    # a newline.  re.MULTILINE makes ^ match at the start of every line.
+    opener_match = re.search(r'^```[^\n]*\n', text, re.MULTILINE)
+    if not opener_match:
         return text  # no fence — plain text replacement
 
-    # Check whether everything before the opener is "meaningful prose" or
-    # just a leaked UI label.  A leaked label is: a single short word with no
-    # spaces (e.g. "Markdown", "Python", "markdown") on its own line.
-    # Real prose (headings, sentences, multi-line preambles) still qualifies
-    # as meaningful and we still discard it to extract only the code content.
-    # The key insight for edit mode: we ALWAYS want just the code block content,
-    # regardless of what surrounds it.
+    content_start = opener_match.end()
+    remaining = text[content_start:]
 
-    # Collect content inside the first fence block using depth tracking.
-    depth = 1
-    collected: List[str] = []
-    for line in lines[opener_idx + 1:]:
-        stripped = line.strip()
-        if stripped == "```":
-            depth -= 1
-            if depth == 0:
-                break  # outer closer — stop, discard everything after
-            collected.append(line)
-        elif stripped.startswith("```") and len(stripped) > 3:
-            depth += 1
-            collected.append(line)
-        else:
-            collected.append(line)
+    # Find ALL bare ``` closers in the remaining text (``` optionally followed
+    # by whitespace, at the start of a line).  \s* handles trailing \r or
+    # non-breaking spaces that would defeat a bare string equality check.
+    closer_matches = list(re.finditer(r'^```\s*$', remaining, re.MULTILINE))
+    if not closer_matches:
+        return text  # unclosed fence — return as-is rather than empty string
 
-    inner = "\n".join(collected).strip()
-    return inner if inner else text
+    # Use the LAST closer so that inner fence blocks are fully captured.
+    last_closer = closer_matches[-1]
+    inner = remaining[:last_closer.start()].strip()
+    if not inner:
+        return text
+
+    # Normalise CRLF / bare-CR line endings that the DOM extractor may have
+    # introduced.  Continue inserts the returned text verbatim into the user's
+    # file; stray \r characters would corrupt Unix files on WSL2.
+    inner = inner.replace('\r\n', '\n').replace('\r', '\n')
+    return inner
 
 
 def clean_response_text(raw: str) -> str:
