@@ -95,6 +95,14 @@ Run the server to provide an OpenAI-compatible endpoint at `http://localhost:800
 browser-ai serve --backend gemini (--visible optional to have interactive browser open)
 ```
 
+### Minimal Built-In Web UI
+
+A lightweight local testing UI is available at `http://localhost:8000/`, reusing the existing OpenAI-compatible endpoints (`GET /v1/models` and `POST /v1/chat/completions`). Start the server as usual with:
+
+```bash
+browser-ai serve --backend gemini
+```
+
 ### 2. Interactive CLI
 
 You can also chat directly with the backend in your terminal:
