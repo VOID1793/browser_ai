@@ -45,14 +45,14 @@
 
 ```mermaid
 flowchart TD
-    A[LLM Client<br>(e.g., Continue)] -->|1. Send Prompt| B[GeminiBackend<br>(gemini.py Selectors)]
-    B -->|2. Handle Consent Popups<br>(Accept/I Agree)| B
+    A["LLM Client<br>(e.g., Continue)"] -->|1. Send Prompt| B["GeminiBackend<br>(gemini.py Selectors)"]
+    B -->|2. Handle Consent Popups| B
     B -->|3. Clear Previous Dialogs| B
-    B -->|4. Locate Input Field| C[Playwright/Browser<br>(Targeting DOM)]
+    B -->|4. Locate Input Field| C["Playwright/Browser<br>(Targeting DOM)"]
     C -->|5. Focus & Type Prompt| C
     C -->|6. Locate Send Button| C
     C -->|7. Click Send| C
-    C -->|8. Wait for Loading / Spinner| D[Gemini Web UI<br>(gemini.google.com)]
+    C -->|8. Wait for Loading / Spinner| D["Gemini Web UI<br>(gemini.google.com)"]
     D -->|9. Generate Model Response| D
     D -->|10. Response Rendered in DOM| E[Extract Response Text]
     E -->|12. Return Final Text| F[LLM Client Receives Response]
