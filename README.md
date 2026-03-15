@@ -43,42 +43,20 @@
 
 ## Example Architecture for Basic Chat
 
-```markdown
-LLM Client (e.g., Continue)
-        │
-        │ 1. Send Prompt
-        ▼
-GeminiBackend (gemini.py Selectors)
-        │
-        │ 2. Handle Consent Popups (Accept/I Agree)
-        │
-        │ 3. Clear Previous Dialogs
-        │
-        │ 4. Locate Input Field
-        ▼
-Playwright/Browser (Targeting DOM)
-        │
-        │ 5. Focus & Type Prompt
-        │
-        │ 6. Locate Send Button
-        │
-        │ 7. Click Send
-        │
-        │ 8. Wait for Loading / Spinner
-        ▼
-Gemini Web UI (gemini.google.com)
-        │
-        │ 9. Generate Model Response
-        │
-        │ 10. Response Rendered in DOM
-        ▼
-        │ 11. Extract Response Text
-        │
-        │ 12. Return Final Text
-        │
-LLM Client Receives Response
+```mermaid
+flowchart TD
+    A[LLM Client<br>(e.g., Continue)] -->|1. Send Prompt| B[GeminiBackend<br>(gemini.py Selectors)]
+    B -->|2. Handle Consent Popups<br>(Accept/I Agree)| B
+    B -->|3. Clear Previous Dialogs| B
+    B -->|4. Locate Input Field| C[Playwright/Browser<br>(Targeting DOM)]
+    C -->|5. Focus & Type Prompt| C
+    C -->|6. Locate Send Button| C
+    C -->|7. Click Send| C
+    C -->|8. Wait for Loading / Spinner| D[Gemini Web UI<br>(gemini.google.com)]
+    D -->|9. Generate Model Response| D
+    D -->|10. Response Rendered in DOM| E[Extract Response Text]
+    E -->|12. Return Final Text| F[LLM Client Receives Response]
 ```
-
 ## 🛠 Prerequisites
 
 - Python 3.8+

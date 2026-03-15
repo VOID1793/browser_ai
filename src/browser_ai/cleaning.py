@@ -77,59 +77,64 @@ def strip_edit_response(text: str) -> str:
     None of that surrounding text belongs in the file.
 
     Strategy:
-      1. Use ``re.MULTILINE`` with a ``^``-anchored pattern to locate the
-         first fenced code block opener (`` ``` `` optionally followed by a
-         language tag) that appears at the true start of a line.  This is
-         immune to invisible-character and mixed-line-ending artefacts
-         (``\\r\\n``, stray ``\\r``, Unicode spaces) that caused the previous
-         line-by-line depth-tracker to silently fail at runtime.
-      2. Once the opener is found, collect everything until the *last* bare
-         `` ``` `` closer that appears at the start of a line.  Using the last
-         closer (rather than the first) correctly preserves nested fences,
-         e.g. a ``markdown`` block that wraps an inner ``python`` block.
-      3. If the opener is found but no closer follows, return the raw text
-         unchanged rather than returning an empty string.
-      4. If no fenced block is present at all, return the raw text unchanged
-         (the response may legitimately be plain-text replacement content).
+      1. Locate ALL fenced code block openers (`` ``` `` optionally followed by
+         a language tag, anchored to the start of a line via ``re.MULTILINE``).
+      2. Walk the openers in REVERSE order (last to first).  For each opener,
+         find the FIRST bare `` ``` `` closer that follows it.
+         Return the content of the LAST complete code block found this way.
+
+    Rationale for last-block preference:
+      LLMs often begin their response by quoting the *original* code or
+      providing an intermediate attempt before giving the final result.  The
+      last complete code block in the response is therefore the most likely
+      to contain the correct replacement.  Using the first-opener → last-closer
+      span (the previous strategy) incorrectly captured all intermediate code
+      and prose in between.
+
+    Edge-case handling:
+      - If no opener exists → return raw text (may be plain-text replacement).
+      - If the last opener has no closer (truncated response) → try the
+        previous opener, continuing until a closed block is found.
+      - If all openers are unclosed → return raw text unchanged rather than
+        an empty string.
+      - Nested fences (e.g. ``markdown`` wrapping ``python``): the outer
+        ``markdown`` fence is already unwrapped by ``clean_response_text``
+        before this function is called, so only the inner fence remains.
 
     Handles all preamble forms without special-casing them:
-      - Bare response:     `` ``` ``\\ncontent\\n`` ``` ``               → content
-      - With heading:      ``## Title``\\n`` ```lang ``\\ncontent\\n`` ``` `` → content
-      - With preamble:     ``Here is the update:``\\n`` ``` ``\\n…       → content
-      - Leaked UI label:   ``Markdown``\\n`` ```mermaid ``\\ncontent\\n`` ``` `` → content
-      - Nested fences:     `` ```markdown ``\\n…`` ```python ``\\n…`` ``` ``\\n…`` ``` `` → full inner content
+      - Bare response:      `` ``` ``\\ncontent\\n`` ``` ``                → content
+      - With heading:       ``## Title``\\n`` ```lang ``\\ncontent\\n`` ``` `` → content
+      - With preamble:      ``Here is the update:``\\n`` ``` ``\\n…         → content
+      - Multi-block (old+new code shown): only the LAST block is returned.
     """
     text = text.strip()
     if not text:
         return text
 
-    # Locate the first opener: ``` followed by an optional language tag, then
-    # a newline.  re.MULTILINE makes ^ match at the start of every line.
-    opener_match = re.search(r'^```[^\n]*\n', text, re.MULTILINE)
-    if not opener_match:
-        return text  # no fence — plain text replacement
+    # All line-anchored fence openers.  re.MULTILINE makes ^ match at the
+    # start of every line, not just the start of the string.
+    openers = list(re.finditer(r'^```[^\n]*\n', text, re.MULTILINE))
+    if not openers:
+        return text  # no fence present — plain text replacement, return as-is
 
-    content_start = opener_match.end()
-    remaining = text[content_start:]
+    # Walk backwards: prefer the last code block (the LLM's "final answer").
+    for opener in reversed(openers):
+        remaining = text[opener.end():]
+        # First bare ``` closer after this opener.  \s* handles trailing \r
+        # or non-breaking spaces that would defeat a bare equality check.
+        closer_match = re.search(r'^```\s*$', remaining, re.MULTILINE)
+        if not closer_match:
+            continue  # opener has no closer — try the previous opener
+        inner = remaining[:closer_match.start()].strip()
+        if not inner:
+            continue  # empty block — skip and try the previous opener
+        # Normalise CRLF / bare-CR introduced by the DOM extractor.
+        # Continue inserts returned text verbatim; stray \r corrupts files.
+        inner = inner.replace('\r\n', '\n').replace('\r', '\n')
+        return inner
 
-    # Find ALL bare ``` closers in the remaining text (``` optionally followed
-    # by whitespace, at the start of a line).  \s* handles trailing \r or
-    # non-breaking spaces that would defeat a bare string equality check.
-    closer_matches = list(re.finditer(r'^```\s*$', remaining, re.MULTILINE))
-    if not closer_matches:
-        return text  # unclosed fence — return as-is rather than empty string
-
-    # Use the LAST closer so that inner fence blocks are fully captured.
-    last_closer = closer_matches[-1]
-    inner = remaining[:last_closer.start()].strip()
-    if not inner:
-        return text
-
-    # Normalise CRLF / bare-CR line endings that the DOM extractor may have
-    # introduced.  Continue inserts the returned text verbatim into the user's
-    # file; stray \r characters would corrupt Unix files on WSL2.
-    inner = inner.replace('\r\n', '\n').replace('\r', '\n')
-    return inner
+    # Every opener was unclosed — return the raw text rather than empty string.
+    return text
 
 
 def clean_response_text(raw: str) -> str:
@@ -152,12 +157,27 @@ def clean_response_text(raw: str) -> str:
     # 1. Two-pass entity unescape
     text = html.unescape(html.unescape(raw))
 
-    # 2. Strip UI junk lines
+    # 2. Strip UI junk lines — fence-aware so code lines are never stripped.
+    # The JS extractor already suppresses button elements (the primary source
+    # of junk), so this is a safety net for text nodes that slip through.
+    # We track fence depth (depth > 0 = inside a fence) and skip stripping
+    # while inside any fenced block to avoid corrupting code content.
     lines = text.splitlines()
-    cleaned: List[str] = [
-        line for line in lines
-        if line.strip().lower() not in JUNK_LINES
-    ]
+    cleaned: List[str] = []
+    fence_depth = 0
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('```'):
+            if stripped == '```':
+                # Bare ``` is either a closer (depth > 0) or a bare opener (depth == 0)
+                fence_depth = max(0, fence_depth - 1) if fence_depth > 0 else fence_depth + 1
+            else:
+                fence_depth += 1  # language-tagged opener always increases depth
+            cleaned.append(line)
+            continue
+        if fence_depth == 0 and stripped.lower() in JUNK_LINES:
+            continue  # UI junk outside a fence — drop it
+        cleaned.append(line)
     text = "\n".join(cleaned)
 
     # 3. Collapse blank lines

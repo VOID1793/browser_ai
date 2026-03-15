@@ -40,6 +40,7 @@ from browser_ai.models import (
 from browser_ai.prompt import (
     build_incremental_prompt,
     normalize_messages_with_tools,
+    reorder_user_message,
 )
 from browser_ai.cleaning import strip_edit_response
 from browser_ai.session import SessionManager, make_session_key
@@ -174,6 +175,22 @@ async def _stream_tool_call(
         "choices": [{"index": 0, "finish_reason": "tool_calls", "delta": {}}],
     }
     yield f"data: {json.dumps(done_chunk)}\n\ndata: [DONE]\n\n"
+
+
+# ── Edit-mode system instruction ─────────────────────────────────────────────
+# Prepended to every /v1/completions prompt so the LLM returns ONLY
+# replacement code rather than explanation + code.  This is the single
+# most reliable lever we have for keeping edit-mode output clean:
+# strip_edit_response() is a fallback, not the primary line of defence.
+#
+# NOTE: intentionally terse.  Verbose instructions ("Here are the rules: …")
+# cause some models to repeat them in the response, which then confuses the
+# fence extractor.
+_EDIT_MODE_PREFIX = (
+    "You are a code editor assistant. "
+    "Respond with ONLY the complete replacement code inside a single fenced "
+    "code block. No explanation, no preamble, no prose — just the fence.\n\n"
+)
 
 
 # ── App factory ───────────────────────────────────────────────────────────────
@@ -493,11 +510,24 @@ def build_app(
         if not raw_prompt:
             raise HTTPException(status_code=400, detail="prompt cannot be empty")
 
+        # Step 1: reorder — moves instruction in front of any leading code block.
+        # Always applied regardless of compat; compat.process_user_message()
+        # runs afterwards as an additional (currently no-op) transform.
+        # reorder_user_message() must be called on the RAW prompt string,
+        # before any prefix assembly.
+        prompt = reorder_user_message(raw_prompt)
         if compat is not None:
-            prompt = compat.process_user_message(raw_prompt)
-        else:
-            from browser_ai.prompt import reorder_user_message
-            prompt = reorder_user_message(raw_prompt)
+            prompt = compat.process_user_message(prompt)
+
+        # Step 2: prepend the edit-mode system instruction.
+        # Only skipped when the request looks like FIM (fill-in-middle):
+        # FIM payloads carry a non-empty `suffix` field; edit-mode payloads
+        # typically do not.  The instruction dramatically improves the
+        # probability that the LLM responds with only fenced code, which
+        # strip_edit_response() can cleanly extract.
+        is_fim = bool(body.suffix and body.suffix.strip())
+        if not is_fim:
+            prompt = _EDIT_MODE_PREFIX + prompt
 
         session_key = make_session_key(
             authorization=authorization,

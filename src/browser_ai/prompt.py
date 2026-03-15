@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from browser_ai.config import MARKDOWN_DOC_HINTS
+from browser_ai.config import MODEL_ID  # noqa: F401  (re-exported for server.py)
 
 
 # ── Message normalisation ─────────────────────────────────────────────────────
