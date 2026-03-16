@@ -177,20 +177,35 @@ async def _stream_tool_call(
     yield f"data: {json.dumps(done_chunk)}\n\ndata: [DONE]\n\n"
 
 
-# ── Edit-mode system instruction ─────────────────────────────────────────────
-# Prepended to every /v1/completions prompt so the LLM returns ONLY
-# replacement code rather than explanation + code.  This is the single
-# most reliable lever we have for keeping edit-mode output clean:
-# strip_edit_response() is a fallback, not the primary line of defence.
+# ── Edit-mode instruction injection ──────────────────────────────────────────
+# Injected into every /v1/completions prompt (non-FIM) so the LLM returns
+# ONLY replacement code.
 #
-# NOTE: intentionally terse.  Verbose instructions ("Here are the rules: …")
-# cause some models to repeat them in the response, which then confuses the
+# PLACEMENT STRATEGY:
+#   Continue's edit-mode prompt for ChatGPT ends with the ChatML boundary
+#   token sequence "<|im_end|> <|im_start|>assistant".  Prepending our
+#   instruction puts it at the FAR END of the context window from where the
+#   LLM generates — it is reliably ignored.
+#
+#   Instead, we detect the ChatML user-turn end marker and insert the
+#   instruction RIGHT BEFORE it.  This makes our instruction the LAST thing
+#   in the user turn, which is the highest-authority position for the model.
+#
+#   For non-ChatML prompts (Gemini), we append after the full prompt text,
+#   which similarly places it at the end of what the model reads.
+#
+# WORDING: kept deliberately terse.  Verbose "here are the rules" blocks
+# cause some models to repeat them in their response, which breaks the
 # fence extractor.
-_EDIT_MODE_PREFIX = (
-    "You are a code editor assistant. "
-    "Respond with ONLY the complete replacement code inside a single fenced "
-    "code block. No explanation, no preamble, no prose — just the fence.\n\n"
+_EDIT_MODE_INSTRUCTION = (
+    "CRITICAL: Respond with ONLY the replacement code "
+    "inside a single fenced code block (``` ... ```). "
+    "No prose, no explanation — just the fence."
 )
+
+# ChatML marker that signals the end of the user turn in Continue's edit prompt.
+# Only present for ChatGPT-style backends.  Absent for Gemini.
+_CHATML_USER_END = "<|im_end|>"
 
 
 # ── App factory ───────────────────────────────────────────────────────────────
@@ -519,15 +534,27 @@ def build_app(
         if compat is not None:
             prompt = compat.process_user_message(prompt)
 
-        # Step 2: prepend the edit-mode system instruction.
+        # Step 2: inject the edit-mode instruction.
         # Only skipped when the request looks like FIM (fill-in-middle):
-        # FIM payloads carry a non-empty `suffix` field; edit-mode payloads
-        # typically do not.  The instruction dramatically improves the
-        # probability that the LLM responds with only fenced code, which
-        # strip_edit_response() can cleanly extract.
+        # FIM payloads carry a non-empty `suffix` field; edit-mode payloads do not.
         is_fim = bool(body.suffix and body.suffix.strip())
         if not is_fim:
-            prompt = _EDIT_MODE_PREFIX + prompt
+            if _CHATML_USER_END in prompt:
+                # ChatML format (ChatGPT via Continue): inject instruction at the end
+                # of the user turn, immediately before the boundary token.  This is
+                # the highest-authority position — the last thing the model reads
+                # before generating.  Prepending (the old approach) placed it at the
+                # far end of the context window where it was reliably ignored.
+                prompt = prompt.replace(
+                    _CHATML_USER_END,
+                    "\n\n" + _EDIT_MODE_INSTRUCTION + "\n" + _CHATML_USER_END,
+                    1,  # only patch the first occurrence
+                )
+                _log("[server] Injected edit instruction at ChatML user-turn boundary.", flush=True)
+            else:
+                # Non-ChatML (Gemini, others): append after the full prompt so the
+                # instruction is the last thing the model reads before generating.
+                prompt = prompt + "\n\n" + _EDIT_MODE_INSTRUCTION
 
         session_key = make_session_key(
             authorization=authorization,

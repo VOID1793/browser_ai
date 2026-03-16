@@ -85,7 +85,18 @@ def strip_edit_response(text: str) -> str:
         inner = inner.replace('\r\n', '\n').replace('\r', '\n')
         return inner
 
-    # Every opener was unclosed — return the raw text rather than empty string.
+    # Every complete block had empty content.  Try returning the content of the
+    # last opener even though it has no closer (LLM truncated or omitted the
+    # closing fence, which is common for long code generation).
+    # Guard: if the remaining text is itself just a lone fence line (```), it is
+    # not real content — fall all the way back to the raw text.
+    last = openers[-1]
+    candidate = text[last.end():].strip()
+    if candidate and not re.match(r'^```\s*$', candidate):
+        return candidate.replace('\r\n', '\n').replace('\r', '\n')
+
+    # Absolute fallback: return raw text so the caller gets something rather
+    # than an empty string or a corrupted insertion.
     return text
 
 
@@ -217,7 +228,18 @@ _EXTRACT_JS = """
 
         if (tag === 'pre') {
             const codeEl = node.querySelector('code');
-            const codeText = codeEl ? codeEl.innerText : node.innerText;
+            // innerText respects CSS visibility; some UIs (e.g. ChatGPT mermaid
+            // diagrams) hide the source <code> element after rendering it as an SVG
+            // or canvas.  innerText returns '' for hidden elements.  Fall back to
+            // textContent (visibility-agnostic) to recover the raw source.
+            let codeText = '';
+            if (codeEl) {
+                codeText = codeEl.innerText;
+                if (!codeText) codeText = codeEl.textContent || '';
+            }
+            if (!codeText) {
+                codeText = node.innerText || node.textContent || '';
+            }
             const lang = getLangForPre(node);
             return '\\n```' + lang + '\\n' + codeText.trimEnd() + '\\n```\\n';
         }
