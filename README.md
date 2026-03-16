@@ -43,7 +43,6 @@
 
 ## Example Architecture for Basic Chat
 
-```mermaid
 sequenceDiagram
     autonumber
     participant Client as 👤 LLM Client<br/>(Cursor/Continue)
@@ -55,18 +54,20 @@ sequenceDiagram
 
     Client->>Bridge: POST /v1/chat/completions
     Bridge->>Bridge: Process Prompt & Reorder Context
-    Bridge->>Playwright: Execute Browser Commands
-    Playwright->>WebUI: Inject Message (Clipboard/Type)
+    Bridge->>Playwright: Initialize/Attach Browser Session
+    Playwright->>WebUI: Navigate & Inject Prompt (Clipboard/Type)
 
+    rect rgb(240, 240, 240)
+    Note right of WebUI: LLM Generation
     loop Monitoring
-        Playwright->>WebUI: Poll for response completion
+        Playwright->>WebUI: Poll DOM for "Stop" button or completion state
+    end
     end
 
-    WebUI-->>Playwright: Render Response (DOM)
-    Playwright->>Bridge: Extract Raw HTML
-    Bridge->>Bridge: Parse DOM to Markdown
+    WebUI-->>Playwright: Rendered Response (DOM)
+    Playwright->>Bridge: Extract Raw HTML Elements
+    Bridge->>Bridge: Custom DOM Walker -> Markdown Conversion
     Bridge-->>Client: Return JSON OpenAI Response
-```
 
 ## 🛠 Prerequisites
 
