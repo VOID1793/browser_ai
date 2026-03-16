@@ -43,46 +43,30 @@
 
 ## Example Architecture for Basic Chat
 ```mermaid
-flowchart LR
-    subgraph Client_Side ["👤 User Environment"]
-        A[/"<b>LLM Client</b><br/>(Continue / Cursor)"/]
+sequenceDiagram
+    autonumber
+    participant Client as 👤 LLM Client<br/>(Cursor/Continue)
+    participant Bridge as 🌉 Browser_Ai<br/>(FastAPI Server)
+    participant Playwright as 🤖 Playwright<br/>(Automation)
+    participant WebUI as 🌐 AI Web Interface<br/>(Gemini/ChatGPT)
+
+    Note over Client, WebUI: Request Lifecycle
+
+    Client->>Bridge: POST /v1/chat/completions
+    Bridge->>Bridge: Process Prompt & Reorder Context
+    Bridge->>Playwright: Execute Browser Commands
+    Playwright->>WebUI: Inject Message (Clipboard/Type)
+
+    loop Monitoring
+        Playwright->>WebUI: Poll for response completion
     end
 
-    subgraph Bridge ["🌉 Browser_Ai Logic"]
-        direction TB
-        B["<b>GeminiBackend</b><br/>(gemini.py)"]
-        E["<b>DOM Extractor</b><br/>(Markdown Parser)"]
-    end
-
-    subgraph Automation ["🤖 Playwright Layer"]
-        C{{"<b>Headless Browser</b><br/>(DOM Interaction)"}}
-    end
-
-    subgraph External ["🌐 Web Interface"]
-        D[("<b>Gemini Web UI</b><br/>([google.com/app](https://google.com/app))")]
-    end
-
-    %% Flow Connections
-    A ==>|1. Request| B
-    B ==>|2. Automation| C
-    C <==>|3. Action & Wait| D
-    D -.->|4. Render| C
-    C ==>|5. Raw HTML| E
-    E ==>|6. JSON Response| A
-
-    %% Styling
-    style A fill:#e1f5fe,stroke:#01579b,stroke-width:2px
-    style B fill:#fff3e0,stroke:#e65100,stroke-width:2px
-    style E fill:#fff3e0,stroke:#e65100,stroke-width:2px
-    style C fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
-    style D fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px
-
-    %% Subgraph Styling
-    style Client_Side fill:none,stroke:#90a4ae,stroke-dasharray: 5 5
-    style Bridge fill:none,stroke:#90a4ae,stroke-dasharray: 5 5
-    style Automation fill:none,stroke:#90a4ae,stroke-dasharray: 5 5
-    style External fill:none,stroke:#90a4ae,stroke-dasharray: 5 5
+    WebUI-->>Playwright: Render Response (DOM)
+    Playwright->>Bridge: Extract Raw HTML
+    Bridge->>Bridge: Parse DOM to Markdown
+    Bridge-->>Client: Return JSON OpenAI Response
 ```
+
 ## 🛠 Prerequisites
 
 - Python 3.8+

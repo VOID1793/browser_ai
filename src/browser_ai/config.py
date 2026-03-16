@@ -65,12 +65,3 @@ FILE_WRITE_TOOLS: frozenset[str] = frozenset({
 
 # Argument names that carry file content, in priority order.
 CONTENT_ARG_NAMES: tuple[str, ...] = ("contents", "content", "text", "body", "data")
-
-# ── Markdown document detection ───────────────────────────────────────────────
-# Keywords that suggest the user wants a markdown document as output.
-# When detected, a wrap instruction is appended so the response can be
-# extracted as raw markdown rather than rendered HTML text.
-MARKDOWN_DOC_HINTS: frozenset[str] = frozenset({
-    "readme", "readme.md", ".md", "markdown", "document", "documentation",
-    "write a doc", "write doc", "generate doc", "create doc",
-})

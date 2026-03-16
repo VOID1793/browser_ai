@@ -18,54 +18,6 @@ from browser_ai.config import JUNK_LINES
 
 # ── Plain-text cleaning ───────────────────────────────────────────────────────
 
-def unwrap_markdown_fence(text: str) -> str:
-    """
-    Strip an outer ```markdown / ```md wrapper added by the LLM in response
-    to an explicit _WRAP_INSTRUCTION request.
-
-    Only unwraps ```markdown and ```md openers — never a bare ``` opener.
-    Bare ``` at the start of a response is legitimate content (e.g. a code
-    block is the first thing in the reply) and must not be stripped.
-
-    Tracks fence nesting depth so that inner code blocks (``` inside the
-    wrapped content) do not prematurely terminate the unwrap.  The outer
-    closer is the ``` that brings the depth back to zero.
-
-    Returns the text unchanged if no recognised opener is found, if the
-    opener is unclosed, or if the extracted content is empty.
-    """
-    text = text.strip()
-    for open_tag in ("```markdown", "```md"):
-        if not text.startswith(open_tag):
-            continue
-        rest = text[len(open_tag):]
-        first_newline = rest.find('\n')
-        if first_newline == -1:
-            return text  # malformed — no newline after opener
-        content_start = first_newline + 1
-        lines = rest[content_start:].splitlines()
-        # depth=1 because we are inside the outer opener.
-        # Any line starting with ``` that is NOT a closer (has chars after)
-        # opens a new inner block (depth+1).  A bare ``` line closes one
-        # level (depth-1).  When depth reaches 0 we have the outer closer.
-        depth = 1
-        collected: List[str] = []
-        for line in lines:
-            stripped = line.strip()
-            if stripped == "```":
-                depth -= 1
-                if depth == 0:
-                    inner = "\n".join(collected).strip()
-                    return inner if inner else text
-                collected.append(line)
-            elif stripped.startswith("```") and len(stripped) > 3:
-                depth += 1
-                collected.append(line)
-            else:
-                collected.append(line)
-        return text  # unclosed
-    return text
-
 
 def strip_edit_response(text: str) -> str:
     """
@@ -147,9 +99,18 @@ def clean_response_text(raw: str) -> str:
          (e.g. '&gt;' displayed on screen rather than '>').  A single pass
          of html.unescape() fixes singly-escaped entities; a second pass
          catches doubly-escaped cases like '&amp;gt;' → '&gt;' → '>'.
-      2. Remove known UI junk lines (case-insensitive exact match).
+      2. Remove known UI junk lines (case-insensitive exact match) — fence-aware
+         so that valid code lines that happen to match a junk string are never
+         stripped from inside a code block.
       3. Collapse runs of 3+ consecutive blank lines to 2.
-      4. Unwrap an outer ```markdown fence if present.
+
+    NOTE: This function deliberately does NOT unwrap ```markdown fences.
+    Doing so unconditionally caused non-deterministic chat output: LLMs
+    sporadically choose to wrap markdown-heavy responses in a ```markdown
+    fence without being asked, and stripping that wrapper on every response
+    made identical prompts produce different output depending on the LLM's
+    mood.  edit mode (strip_edit_response) handles nested/wrapped fences via
+    the last-complete-block strategy without needing a pre-pass here.
     """
     if not raw:
         return raw
@@ -182,9 +143,6 @@ def clean_response_text(raw: str) -> str:
 
     # 3. Collapse blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
-
-    # 4. Unwrap markdown fence
-    text = unwrap_markdown_fence(text)
 
     return text.strip()
 

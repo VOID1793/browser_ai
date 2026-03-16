@@ -106,34 +106,6 @@ def normalize_messages_with_tools(messages: List[Dict[str, Any]]) -> List[Dict[s
 
 # ── Prompt builders ───────────────────────────────────────────────────────────
 
-_WRAP_INSTRUCTION = (
-    "\n\nIMPORTANT: Your entire response must be wrapped in a single "
-    "```markdown ... ``` code fence so it can be copied as raw text. "
-    "Do not render or interpret the markdown — output it as a raw string "
-    "inside the fence."
-)
-
-
-def _is_markdown_doc_request(text: str) -> bool:
-    """
-    Return True only for explicit requests to CREATE a markdown document.
-
-    Intentionally narrow: referencing a README or .md file in context does
-    NOT qualify.  The request itself must use language like "write a README",
-    "generate documentation", "create a .md file", etc.
-    """
-    lowered = text.lower()
-    # Must contain an action verb + a document-type hint on the same line,
-    # or be an explicit "write/create/generate doc" phrase.
-    ACTION_HINTS = frozenset({
-        "write a readme", "write readme", "create a readme", "generate readme",
-        "write a doc", "create a doc", "generate doc", "write doc",
-        "write documentation", "create documentation", "generate documentation",
-        "write a .md", "create a .md", "generate a .md",
-        "write markdown", "create markdown", "generate markdown",
-    })
-    return any(hint in lowered for hint in ACTION_HINTS)
-
 
 def reorder_user_message(user_content: str) -> str:
     """
@@ -156,9 +128,6 @@ def reorder_user_message(user_content: str) -> str:
         <file contents>
         ```
 
-    This function MUST only be called on the raw user message string, not on
-    an assembled prompt that already has system-instruction text prepended.
-
     Algorithm:
       - The FIRST line that starts with ``` is the outer opener.
       - The outer closer is the LAST line that is exactly ``` (nothing after).
@@ -167,8 +136,8 @@ def reorder_user_message(user_content: str) -> str:
       - Everything after the outer closer is the instruction.
       - Requires at least 3 words of instruction to avoid spurious reordering.
 
-    The markdown-wrap instruction is appended only for explicit doc-creation
-    requests, not for queries that merely reference a markdown file.
+    This function MUST only be called on the raw user message string, not on
+    an assembled prompt that already has system-instruction text prepended.
     """
     content = user_content.strip()
     lines = content.splitlines()
@@ -181,12 +150,9 @@ def reorder_user_message(user_content: str) -> str:
             break
 
     if opener_idx is None:
-        if _is_markdown_doc_request(content):
-            return content + _WRAP_INSTRUCTION
         return content
 
     # Find the LAST line that is a bare closing fence (exactly ```)
-    # This is the outer block's closer regardless of inner fences.
     closer_idx = None
     for i in range(len(lines) - 1, opener_idx, -1):
         if lines[i].strip() == "```":
@@ -204,10 +170,6 @@ def reorder_user_message(user_content: str) -> str:
         return content
 
     code_block = "\n".join(lines[opener_idx : closer_idx + 1])
-
-    if _is_markdown_doc_request(instruction):
-        instruction = instruction + _WRAP_INSTRUCTION
-
     return f"{instruction}\n\nHere is the relevant file context:\n\n{code_block}"
 
 
