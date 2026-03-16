@@ -46,48 +46,26 @@
 ```mermaid
 sequenceDiagram
     autonumber
+    participant Client as 👤 LLM Client<br/>(Cursor/Continue)
+    participant Bridge as 🌉 Browser_Ai<br/>(FastAPI Server)
+    participant Playwright as 🤖 Playwright<br/>(Automation)
+    participant WebUI as 🌐 AI Web Interface<br/>(Gemini/ChatGPT)
 
+    Note over Client, WebUI: Request Lifecycle
 
+    Client->>Bridge: POST /v1/chat/completions
+    Bridge->>Bridge: Process Prompt & Reorder Context
+    Bridge->>Playwright: Execute Browser Commands
+    Playwright->>WebUI: Inject Message (Clipboard/Type)
 
-
-
-
-    %% Define participants with colors and icons
-    participant Client as <font color="#3498db">👤 LLM Client</font><br/>(Cursor/Continue)
-    participant Bridge as <font color="#9b59b6">🌉 Browser_Ai</font><br/>(FastAPI Server)
-    participant Playwright as <font color="#e67e22">🤖 Playwright</font><br/>(Automation)
-    participant WebUI as <font color="#2ecc71">🌐 AI Web Interface</font><br/>(Gemini/ChatGPT)
-
-
-
-
-
-    Note over Client, WebUI: ⚡ Request Lifecycle ⚡
-
-
-    rect rgb(240, 248, 255)
-        Client->>+Bridge: POST /v1/chat/completions
-        Bridge->>Bridge: 🛠️ Process Prompt & Reorder Context
-        Bridge->>+Playwright: Execute Browser Commands
-        Playwright->>+WebUI: 📨 Inject Message (Clipboard/Type)
-    end
-
-    loop 🔍 Monitoring
+    loop Monitoring
         Playwright->>WebUI: Poll for response completion
-        WebUI-->>Playwright: [Status: Generating...]
     end
 
-
-
-
-
-
-    rect rgb(245, 255, 250)
-        WebUI-->>-Playwright: ✅ Render Response (DOM)
-        Playwright->>-Bridge: 📄 Extract Raw HTML
-        Bridge->>Bridge: 🔄 Parse DOM to Markdown
-        Bridge-->>-Client: 📥 Return JSON OpenAI Response
-    end
+    WebUI-->>Playwright: Render Response (DOM)
+    Playwright->>Bridge: Extract Raw HTML
+    Bridge->>Bridge: Parse DOM to Markdown
+    Bridge-->>Client: Return JSON OpenAI Response
 ```
 
 ## 🛠 Prerequisites
