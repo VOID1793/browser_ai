@@ -55,10 +55,10 @@ sequenceDiagram
     Note over Client, WebUI: ⚡ Request Lifecycle ⚡
 
     rect rgb(240, 248, 255)
-        Client->>Bridge: POST /v1/chat/completions
+        Client->>+Bridge: POST /v1/chat/completions
         Bridge->>Bridge: 🛠️ Process Prompt & Reorder Context
-        Bridge->>Playwright: Execute Browser Commands
-        Playwright->>WebUI: 📨 Inject Message (Clipboard/Type)
+        Bridge->>+Playwright: Execute Browser Commands
+        Playwright->>+WebUI: 📨 Inject Message (Clipboard/Type)
     end
 
     loop 🔍 Monitoring
@@ -67,10 +67,10 @@ sequenceDiagram
     end
 
     rect rgb(245, 255, 250)
-        WebUI-->>Playwright: ✅ Render Response (DOM)
-        Playwright->>Bridge: 📄 Extract Raw HTML
+        WebUI-->>-Playwright: ✅ Render Response (DOM)
+        Playwright->>-Bridge: 📄 Extract Raw HTML
         Bridge->>Bridge: 🔄 Parse DOM to Markdown
-        Bridge-->>Client: 📥 Return JSON OpenAI Response
+        Bridge-->>-Client: 📥 Return JSON OpenAI Response
     end
 ```
 ## 🛠 Prerequisites
