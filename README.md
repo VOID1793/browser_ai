@@ -42,9 +42,15 @@
 - **Flexible Rendering**: Support for both Headless (silent) and Visible (interactive) browser modes.
 
 ## Example Architecture for Basic Chat
-```mermaid
+
+
 sequenceDiagram
     autonumber
+
+
+
+
+
 
     %% Define participants with colors and icons
     participant Client as <font color="#3498db">👤 LLM Client</font><br/>(Cursor/Continue)
@@ -52,7 +58,12 @@ sequenceDiagram
     participant Playwright as <font color="#e67e22">🤖 Playwright</font><br/>(Automation)
     participant WebUI as <font color="#2ecc71">🌐 AI Web Interface</font><br/>(Gemini/ChatGPT)
 
+
+
+
+
     Note over Client, WebUI: ⚡ Request Lifecycle ⚡
+
 
     rect rgb(240, 248, 255)
         Client->>+Bridge: POST /v1/chat/completions
@@ -66,13 +77,18 @@ sequenceDiagram
         WebUI-->>Playwright: [Status: Generating...]
     end
 
+
+
+
+
+
     rect rgb(245, 255, 250)
         WebUI-->>-Playwright: ✅ Render Response (DOM)
         Playwright->>-Bridge: 📄 Extract Raw HTML
         Bridge->>Bridge: 🔄 Parse DOM to Markdown
         Bridge-->>-Client: 📥 Return JSON OpenAI Response
     end
-```
+
 ## 🛠 Prerequisites
 
 - Python 3.8+
