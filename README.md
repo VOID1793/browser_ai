@@ -43,7 +43,7 @@
 
 ## Example Architecture for Basic Chat
 
-
+```mermaid
 sequenceDiagram
     autonumber
 
@@ -88,6 +88,7 @@ sequenceDiagram
         Bridge->>Bridge: 🔄 Parse DOM to Markdown
         Bridge-->>-Client: 📥 Return JSON OpenAI Response
     end
+```
 
 ## 🛠 Prerequisites
 
