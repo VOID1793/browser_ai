@@ -42,41 +42,46 @@
 - **Flexible Rendering**: Support for both Headless (silent) and Visible (interactive) browser modes.
 
 ## Example Architecture for Basic Chat
-
 ```mermaid
-flowchart TD
-    subgraph Client_Side [User Environment]
-        A[/"<b>LLM Client</b><br>(Continue / Cursor)"/]
+flowchart LR
+    subgraph Client_Side ["👤 User Environment"]
+        A[/"<b>LLM Client</b><br/>(Continue / Cursor)"/]
     end
 
-    subgraph Bridge [Browser_Ai Logic]
+    subgraph Bridge ["🌉 Browser_Ai Logic"]
         direction TB
-        B["<b>GeminiBackend</b><br>(gemini.py)"]
-        E["<b>DOM Extractor</b><br>(Markdown Parser)"]
+        B["<b>GeminiBackend</b><br/>(gemini.py)"]
+        E["<b>DOM Extractor</b><br/>(Markdown Parser)"]
     end
 
-    subgraph Automation [Playwright Layer]
-        C{{"<b>Headless Browser</b><br>(DOM Interaction)"}}
+    subgraph Automation ["🤖 Playwright Layer"]
+        C{{"<b>Headless Browser</b><br/>(DOM Interaction)"}}
     end
 
-    subgraph External [Web Interface]
-        D[("<b>Gemini Web UI</b><br>([google.com/app](https://google.com/app))")]
+    subgraph External ["🌐 Web Interface"]
+        D[("<b>Gemini Web UI</b><br/>([google.com/app](https://google.com/app))")]
     end
 
     %% Flow Connections
-    A -->|1. Request| B
-    B -->|2. Logic| C
-    C <-->|3. Action/Wait| D
+    A ==>|1. Request| B
+    B ==>|2. Automation| C
+    C <==>|3. Action & Wait| D
     D -.->|4. Render| C
-    C -->|5. Raw HTML| E
-    E -->|6. JSON Response| A
+    C ==>|5. Raw HTML| E
+    E ==>|6. JSON Response| A
 
     %% Styling
-    style A fill:#e1f5fe,stroke:#01579b
-    style B fill:#fff3e0,stroke:#e65100
-    style E fill:#fff3e0,stroke:#e65100
-    style C fill:#f3e5f5,stroke:#4a148c
-    style D fill:#e8f5e9,stroke:#1b5e20
+    style A fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    style B fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    style E fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    style C fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    style D fill:#e8f5e9,stroke:#1b5e20,stroke-width:2px
+
+    %% Subgraph Styling
+    style Client_Side fill:none,stroke:#90a4ae,stroke-dasharray: 5 5
+    style Bridge fill:none,stroke:#90a4ae,stroke-dasharray: 5 5
+    style Automation fill:none,stroke:#90a4ae,stroke-dasharray: 5 5
+    style External fill:none,stroke:#90a4ae,stroke-dasharray: 5 5
 ```
 ## 🛠 Prerequisites
 
