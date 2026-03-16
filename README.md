@@ -42,7 +42,7 @@
 - **Flexible Rendering**: Support for both Headless (silent) and Visible (interactive) browser modes.
 
 ## Example Architecture for Basic Chat
-
+```mermaid
 sequenceDiagram
     autonumber
     participant Client as 👤 LLM Client<br/>(Cursor/Continue)
@@ -68,7 +68,7 @@ sequenceDiagram
     Playwright->>Bridge: Extract Raw HTML Elements
     Bridge->>Bridge: Custom DOM Walker -> Markdown Conversion
     Bridge-->>Client: Return JSON OpenAI Response
-
+```
 ## 🛠 Prerequisites
 
 - Python 3.8+
