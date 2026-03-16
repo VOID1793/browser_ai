@@ -45,17 +45,38 @@
 
 ```mermaid
 flowchart TD
-    A["LLM Client<br>(e.g., Continue)"] -->|1. Send Prompt| B["GeminiBackend<br>(gemini.py Selectors)"]
-    B -->|2. Handle Consent Popups| B
-    B -->|3. Clear Previous Dialogs| B
-    B -->|4. Locate Input Field| C["Playwright/Browser<br>(Targeting DOM)"]
-    C -->|5. Focus & Type Prompt| C
-    C -->|6. Locate Send Button| C
-    C -->|7. Click Send| C
-    C -->|8. Wait for Loading / Spinner| D["Gemini Web UI<br>(gemini.google.com)"]
-    D -->|9. Generate Model Response| D
-    D -->|10. Response Rendered in DOM| E[Extract Response Text]
-    E -->|11. Return Final Text| F[LLM Client Receives Response]
+    subgraph Client_Side [User Environment]
+        A[/"<b>LLM Client</b><br>(Continue / Cursor)"/]
+    end
+
+    subgraph Bridge [Browser_Ai Logic]
+        direction TB
+        B["<b>GeminiBackend</b><br>(gemini.py)"]
+        E["<b>DOM Extractor</b><br>(Markdown Parser)"]
+    end
+
+    subgraph Automation [Playwright Layer]
+        C{{"<b>Headless Browser</b><br>(DOM Interaction)"}}
+    end
+
+    subgraph External [Web Interface]
+        D[("<b>Gemini Web UI</b><br>([google.com/app](https://google.com/app))")]
+    end
+
+    %% Flow Connections
+    A -->|1. Request| B
+    B -->|2. Logic| C
+    C <-->|3. Action/Wait| D
+    D -.->|4. Render| C
+    C -->|5. Raw HTML| E
+    E -->|6. JSON Response| A
+
+    %% Styling
+    style A fill:#e1f5fe,stroke:#01579b
+    style B fill:#fff3e0,stroke:#e65100
+    style E fill:#fff3e0,stroke:#e65100
+    style C fill:#f3e5f5,stroke:#4a148c
+    style D fill:#e8f5e9,stroke:#1b5e20
 ```
 ## 🛠 Prerequisites
 
