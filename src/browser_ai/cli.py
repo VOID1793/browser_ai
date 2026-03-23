@@ -140,7 +140,7 @@ def cmd_backends(_args) -> None:
     print()
 
 
-def _resolve_headless(args, backend_class) -> Optional[bool]:
+def _resolve_headless(args) -> Optional[bool]:
     """
     Resolve the effective headless flag.
 
@@ -169,7 +169,7 @@ def cmd_serve(args) -> None:
         print(f"[error] {exc}", file=sys.stderr)
         sys.exit(1)
 
-    headless = _resolve_headless(args, backend_class)
+    headless = _resolve_headless(args)
     quiet = getattr(args, "quiet", False)
 
     effective_headless = headless if headless is not None else backend_class.DEFAULT_HEADLESS
@@ -238,7 +238,7 @@ async def _interactive(backend_name: str, headless: Optional[bool]) -> None:
 
 
 def cmd_chat(args) -> None:
-    headless = _resolve_headless(args, None)
+    headless = _resolve_headless(args)
     interactive = getattr(args, "session", False) or args.prompt is None
 
     if interactive:

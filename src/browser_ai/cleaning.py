@@ -21,83 +21,62 @@ from browser_ai.config import JUNK_LINES
 
 def strip_edit_response(text: str) -> str:
     """
-    Extract the replacement content from an edit-mode response.
+    Extract the fence-INCLUSIVE replacement block from an edit-mode response.
 
-    Continue's /v1/completions (edit mode) inserts the response verbatim into
-    the user's file.  LLMs frequently wrap their edit in a fenced code block,
-    and may also add a heading, preamble, or trailing explanation around it.
-    None of that surrounding text belongs in the file.
+    Continue's /v1/completions (edit mode) uses the response text to REPLACE
+    the user's selection verbatim.  The user's selection includes the fence
+    markers (e.g. ```mermaid ... ```).  Therefore, we must return
+    the fence markers too — stripping them causes Continue to diff "delete the
+    fence lines from the file."
 
     Strategy:
-      1. Locate ALL fenced code block openers (`` ``` `` optionally followed by
-         a language tag, anchored to the start of a line via ``re.MULTILINE``).
-      2. Walk the openers in REVERSE order (last to first).  For each opener,
-         find the FIRST bare `` ``` `` closer that follows it.
-         Return the content of the LAST complete code block found this way.
+      Walk code-block openers in REVERSE (last → first).  For each opener,
+      find its first subsequent closer.  Return the LAST complete code block
+      INCLUDING its opener and closer fence lines.
 
-    Rationale for last-block preference:
-      LLMs often begin their response by quoting the *original* code or
-      providing an intermediate attempt before giving the final result.  The
-      last complete code block in the response is therefore the most likely
-      to contain the correct replacement.  Using the first-opener → last-closer
-      span (the previous strategy) incorrectly captured all intermediate code
-      and prose in between.
+      Last-block preference: LLMs frequently show the original before the
+      replacement; the final code block is the intended answer.
 
-    Edge-case handling:
-      - If no opener exists → return raw text (may be plain-text replacement).
-      - If the last opener has no closer (truncated response) → try the
-        previous opener, continuing until a closed block is found.
-      - If all openers are unclosed → return raw text unchanged rather than
-        an empty string.
-      - Nested fences (e.g. ``markdown`` wrapping ``python``): the outer
-        ``markdown`` fence is already unwrapped by ``clean_response_text``
-        before this function is called, so only the inner fence remains.
+      Unclosed-block fallback: if the last opener has no closer (LLM truncated
+      its output), return everything from that opener to end-of-text.  This
+      is better than returning the raw prose-wrapped response.
 
-    Handles all preamble forms without special-casing them:
-      - Bare response:      `` ``` ``\\ncontent\\n`` ``` ``                → content
-      - With heading:       ``## Title``\\n`` ```lang ``\\ncontent\\n`` ``` `` → content
-      - With preamble:      ``Here is the update:``\\n`` ``` ``\\n…         → content
-      - Multi-block (old+new code shown): only the LAST block is returned.
+    Returns ``text`` unchanged when no fence is found (plain-text replacement).
+    Never returns an empty string — if extraction yields nothing, returns raw.
     """
     text = text.strip()
     if not text:
         return text
 
-    # All line-anchored fence openers.  re.MULTILINE makes ^ match at the
-    # start of every line, not just the start of the string.
     openers = list(re.finditer(r'^```[^\n]*\n', text, re.MULTILINE))
     if not openers:
-        return text  # no fence present — plain text replacement, return as-is
+        return text  # no fence — plain text replacement
 
-    # Walk backwards: prefer the last code block (the LLM's "final answer").
     for opener in reversed(openers):
         remaining = text[opener.end():]
-        # First bare ``` closer after this opener.  \s* handles trailing \r
-        # or non-breaking spaces that would defeat a bare equality check.
         closer_match = re.search(r'^```\s*$', remaining, re.MULTILINE)
         if not closer_match:
-            continue  # opener has no closer — try the previous opener
+            continue
         inner = remaining[:closer_match.start()].strip()
         if not inner:
-            continue  # empty block — skip and try the previous opener
-        # Normalise CRLF / bare-CR introduced by the DOM extractor.
-        # Continue inserts returned text verbatim; stray \r corrupts files.
-        inner = inner.replace('\r\n', '\n').replace('\r', '\n')
-        return inner
+            continue  # empty block — skip
 
-    # Every complete block had empty content.  Try returning the content of the
-    # last opener even though it has no closer (LLM truncated or omitted the
-    # closing fence, which is common for long code generation).
-    # Guard: if the remaining text is itself just a lone fence line (```), it is
-    # not real content — fall all the way back to the raw text.
+        # Reconstruct fence-inclusive block.
+        # opener.group(0) is e.g. "```mermaid\n"  — strip trailing newline for clean join.
+        fence_open = opener.group(0).rstrip('\n')
+        fence_close = "```"
+        result = f"{fence_open}\n{inner}\n{fence_close}"
+        return result.replace('\r\n', '\n').replace('\r', '\n')
+
+    # Unclosed fallback: return from last opener to end-of-text (LLM truncated).
     last = openers[-1]
     candidate = text[last.end():].strip()
     if candidate and not re.match(r'^```\s*$', candidate):
-        return candidate.replace('\r\n', '\n').replace('\r', '\n')
+        fence_open = last.group(0).rstrip('\n')
+        result = f"{fence_open}\n{candidate}"
+        return result.replace('\r\n', '\n').replace('\r', '\n')
 
-    # Absolute fallback: return raw text so the caller gets something rather
-    # than an empty string or a corrupted insertion.
-    return text
+    return text  # absolute fallback — return raw so caller gets something
 
 
 def clean_response_text(raw: str) -> str:
@@ -129,6 +108,27 @@ def clean_response_text(raw: str) -> str:
     # 1. Two-pass entity unescape
     text = html.unescape(html.unescape(raw))
 
+    # 1b. Convert literal \n (backslash-n) to actual newlines outside code fences.
+    # Some DOM contexts return text with \n as two literal characters rather than
+    # actual newline bytes. This converts them so the response renders correctly.
+    # We track fence depth so we don't corrupt code block content.
+    fence_depth = 0
+    result_lines: List[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('```'):
+            if stripped == '```':
+                # Bare ``` toggles between outside (depth=0) and inside (depth=1)
+                fence_depth = 1 if fence_depth == 0 else 0
+            else:
+                fence_depth += 1  # language-tagged opener always increases depth
+            result_lines.append(line)
+            continue
+        if fence_depth == 0:
+            line = line.replace('\\n', '\n')
+        result_lines.append(line)
+    text = '\n'.join(result_lines)
+
     # 2. Strip UI junk lines — fence-aware so code lines are never stripped.
     # The JS extractor already suppresses button elements (the primary source
     # of junk), so this is a safety net for text nodes that slip through.
@@ -141,8 +141,8 @@ def clean_response_text(raw: str) -> str:
         stripped = line.strip()
         if stripped.startswith('```'):
             if stripped == '```':
-                # Bare ``` is either a closer (depth > 0) or a bare opener (depth == 0)
-                fence_depth = max(0, fence_depth - 1) if fence_depth > 0 else fence_depth + 1
+                # Bare ``` toggles between outside (depth=0) and inside (depth=1)
+                fence_depth = 1 if fence_depth == 0 else 0
             else:
                 fence_depth += 1  # language-tagged opener always increases depth
             cleaned.append(line)
@@ -163,7 +163,7 @@ def clean_response_text(raw: str) -> str:
 # JavaScript walker injected into the browser page.
 # Reconstructs markdown-friendly output from the DOM structure, preserving
 # code block fences and headings that inner_text() would discard.
-_EXTRACT_JS = """
+_EXTRACT_JS = r"""
 (element) => {
     const allPres = Array.from(element.querySelectorAll('pre'));
     const suppressedNodes = new Set();
@@ -212,6 +212,25 @@ _EXTRACT_JS = """
             }
         }
 
+        // ChatGPT code block header: the language name appears as the text
+        // content of the first child div inside the <pre> that contains the
+        // block label (e.g. "Mermaid", "Python").  It is a single short word
+        // with no spaces.  Only accept it when a .cm-content is also present
+        // (confirms this is the ChatGPT CodeMirror UI, not generic content).
+        if (pre.querySelector('.cm-content')) {
+            // Walk the first-level divs looking for a short single-word label.
+            const headerCandidates = pre.querySelectorAll(
+                'div > div > svg ~ div, div[class*="font-medium"]'
+            );
+            for (const el of headerCandidates) {
+                const t = el.textContent.trim();
+                if (t && !t.includes('\n') && t.split(' ').length <= 2 && t.length <= 20) {
+                    // Normalise: "Mermaid" → "mermaid", "Python" → "python", etc.
+                    return t.toLowerCase().replace(/\s+/g, '');
+                }
+            }
+        }
+
         // Do NOT fall back to previous-sibling text content — UI labels like
         // "Code snippet" or "Copy" will be misidentified as language tags.
         return '';
@@ -236,6 +255,31 @@ _EXTRACT_JS = """
             if (codeEl) {
                 codeText = codeEl.innerText;
                 if (!codeText) codeText = codeEl.textContent || '';
+            }
+            if (!codeText) {
+                // ChatGPT Code view renders source in a CodeMirror editor
+                // (.cm-content) using <span>line</span><br> pairs instead of a
+                // <code> element.  innerText on the outer <pre> only returns the
+                // header label text ("Mermaid") — the CM editor content is not
+                // exposed that way.  Walk childNodes explicitly: span -> text, br -> \n.
+                const cmContent = node.querySelector('.cm-content');
+                if (cmContent) {
+                    let lines = '';
+                    for (const child of cmContent.childNodes) {
+                        if (child.nodeType === Node.TEXT_NODE) {
+                            lines += child.textContent;
+                        } else if (child.nodeType === Node.ELEMENT_NODE) {
+                            const t = child.tagName.toLowerCase();
+                            if (t === 'br') {
+                                lines += '\n';
+                            } else {
+                                // span or other inline — recurse into textContent
+                                lines += child.textContent;
+                            }
+                        }
+                    }
+                    codeText = lines;
+                }
             }
             if (!codeText) {
                 codeText = node.innerText || node.textContent || '';

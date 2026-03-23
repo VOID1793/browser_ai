@@ -5,7 +5,7 @@
 **Use public LLM reasoning and context windows within tools like Continue, Cursor, or custom LLM scripts without the need for a public-facing API key.**
 
 ---
->**DISCLAIMER: All tools in use for Browser_Ai are publicly available, openly sourced, tools are are beholden to their respective license agreements. All LLM interfaces accessed by Playwright are to be used in accordance with their respective Terms of Service, and with respect to relevant regulations. Use Browser_Ai at your own discretion.**
+>**LEGAL DISCLAIMER: Browser_Ai is provided "as is" without warranty of any kind. All integrated tools and dependencies are open-source and subject to their individual licensing agreements. By utilizing this software, the user acknowledges that they are solely responsible for ensuring that their use of automated browser interfaces (via Playwright or otherwise) complies with the Terms of Service, Privacy Policies, and Acceptable Use Policies of the respective LLM providers. Browser_Ai does not grant rights to bypass or violate third-party agreements; users assume all legal and technical risks associated with its operation.**
 ---
 
 ## Supported backends
@@ -54,19 +54,16 @@ sequenceDiagram
 
     Client->>Bridge: POST /v1/chat/completions
     Bridge->>Bridge: Process Prompt & Reorder Context
-    Bridge->>Playwright: Initialize/Attach Browser Session
-    Playwright->>WebUI: Navigate & Inject Prompt (Clipboard/Type)
+    Bridge->>Playwright: Execute Browser Commands
+    Playwright->>WebUI: Inject Message (Clipboard/Type)
 
-    rect rgb(240, 240, 240)
-    Note right of WebUI: LLM Generation
     loop Monitoring
-        Playwright->>WebUI: Poll DOM for "Stop" button or completion state
-    end
+        Playwright->>WebUI: Poll for response completion
     end
 
-    WebUI-->>Playwright: Rendered Response (DOM)
-    Playwright->>Bridge: Extract Raw HTML Elements
-    Bridge->>Bridge: Custom DOM Walker -> Markdown Conversion
+    WebUI-->>Playwright: Render Response (DOM)
+    Playwright->>Bridge: Extract Raw HTML
+    Bridge->>Bridge: Parse DOM to Markdown
     Bridge-->>Client: Return JSON OpenAI Response
 ```
 ## 🛠 Prerequisites

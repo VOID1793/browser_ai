@@ -416,12 +416,21 @@ class BaseBrowserBackend(BrowserBackend):
                 if current_text == last_text:
                     stable_count += 1
                     if stable_count >= STABLE_READS:
+                        # Generation is stable. Give the backend a chance to
+                        # reveal hidden source text (e.g. click Code-view
+                        # toggles in ChatGPT) before the final extraction.
+                        try:
+                            await self._prepare_response_element(responses[-1])
+                            # Re-extract after DOM manipulation.
+                            final_text = await extract_clean_response_text(responses[-1])
+                        except Exception:
+                            final_text = current_text
                         print(
                             f"[{self.label}] Response stable after "
                             f"{stable_count} reads.",
                             flush=True,
                         )
-                        return current_text
+                        return final_text
                 else:
                     last_text = current_text
                     stable_count = 1
@@ -450,6 +459,22 @@ class BaseBrowserBackend(BrowserBackend):
         Called once per polling iteration in _wait_for_response.
         Default is a no-op.  Override in backends that show interstitials
         (e.g. ChatGPT login nudge).
+        """
+        pass
+
+    async def _prepare_response_element(self, element) -> None:
+        """
+        Optional hook called once on the final response element, immediately
+        before text is extracted, after generation is confirmed stable.
+
+        Use this to perform any DOM manipulation that reveals hidden source
+        text before the JS walker runs.  The canonical use-case is clicking
+        "Code" view toggles in ChatGPT's mermaid/code-block renderer, which
+        renders diagrams as SVG images and hides the raw source unless the
+        Code tab is explicitly selected.
+
+        Default is a no-op.  Backends override as needed.  Failures are
+        silently swallowed so that a broken toggle never aborts extraction.
         """
         pass
 

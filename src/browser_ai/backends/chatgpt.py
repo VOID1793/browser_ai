@@ -110,3 +110,42 @@ class ChatGPTBackend(BaseBrowserBackend):
             except Exception:
                 continue
         return clicked
+
+    async def _prepare_response_element(self, element) -> None:
+        """
+        Click all "Code" view toggle buttons inside the response element.
+
+        ChatGPT renders mermaid diagrams (and some other block types) as
+        live SVG previews.  When in preview mode the raw source is NOT
+        present anywhere in the DOM — the JS walker finds no <pre>/<code>
+        element and returns an empty string, which causes strip_edit_response
+        to fall back to the entire raw response text.
+
+        Clicking the "Code" toggle swaps the SVG panel for a <pre><code>
+        block containing the verbatim mermaid/code source that the JS walker
+        can then extract normally.
+
+        Selector rationale:
+          button[aria-label="Code"][aria-pressed="false"]
+            — targets ONLY tabs that are currently in Preview mode
+              (aria-pressed="true" means it is already showing code).
+            — scoped to the response element, so it never clicks toggles
+              in older turns.
+
+        We iterate and click sequentially rather than all-at-once to avoid
+        racing with React's re-render after each click.
+        """
+        try:
+            code_btns = await element.locator(
+                'button[aria-label="Code"][aria-pressed="false"]'
+            ).all()
+            for btn in code_btns:
+                try:
+                    if await btn.is_visible(timeout=400):
+                        await btn.click(timeout=600)
+                        # Give React a tick to swap the panel.
+                        await element.page().wait_for_timeout(150)
+                except Exception:
+                    pass
+        except Exception:
+            pass

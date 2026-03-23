@@ -50,11 +50,19 @@ def extract_text_content(content: Any) -> str:
 
 
 def normalize_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-    """Basic normaliser — converts every message to {role, content} strings."""
+    """
+    Basic normaliser — converts every message to {role, content} strings.
+
+    Skips empty user messages (e.g., content: []) that Continue can send during
+    inline edit attempts. These are unparseable and cause "no user/tool message
+    found" errors in Continue's history parser.
+    """
     normalized: List[Dict[str, str]] = []
     for m in messages:
         role = str(m.get("role", "user")).strip().lower()
         content = extract_text_content(m.get("content", ""))
+        if role == "user" and not content:
+            continue
         normalized.append({"role": role, "content": content})
     return normalized
 
@@ -99,6 +107,8 @@ def normalize_messages_with_tools(messages: List[Dict[str, Any]]) -> List[Dict[s
             continue
 
         content = extract_text_content(m.get("content", ""))
+        if role == "user" and not content:
+            continue
         normalized.append({"role": role, "content": content})
 
     return normalized

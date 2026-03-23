@@ -182,30 +182,66 @@ async def _stream_tool_call(
 # ONLY replacement code.
 #
 # PLACEMENT STRATEGY:
-#   Continue's edit-mode prompt for ChatGPT ends with the ChatML boundary
-#   token sequence "<|im_end|> <|im_start|>assistant".  Prepending our
-#   instruction puts it at the FAR END of the context window from where the
-#   LLM generates — it is reliably ignored.
+#   Continue's edit-mode prompt for ChatGPT ends with TWO ChatML tokens:
+#     <|im_end|>  — closes the user turn
+#     <|im_start|>assistant [prefill text] — OPENS the assistant turn with a
+#     pre-written sentence ("Sure! Here's the entire code block...").
 #
-#   Instead, we detect the ChatML user-turn end marker and insert the
-#   instruction RIGHT BEFORE it.  This makes our instruction the LAST thing
-#   in the user turn, which is the highest-authority position for the model.
+#   This assistant prefill is ChatGPT-specific and it is the ROOT CAUSE of
+#   ChatGPT edit mode failure.  ChatGPT continues from that prefill and
+#   reproduces the ENTIRE file, completely ignoring any instruction in the
+#   user turn.  Our injection before <|im_end|> was therefore also ignored.
 #
-#   For non-ChatML prompts (Gemini), we append after the full prompt text,
-#   which similarly places it at the end of what the model reads.
+#   FIX:
+#   1. Inject our instruction immediately before <|im_end|> (last user-turn
+#      position — highest authority for the user turn).
+#   2. Strip the prefill text that follows <|im_start|>assistant, leaving only
+#      the bare token.  ChatGPT then generates fresh from zero context,
+#      sees our instruction, and returns only the fenced code.
 #
-# WORDING: kept deliberately terse.  Verbose "here are the rules" blocks
-# cause some models to repeat them in their response, which breaks the
-# fence extractor.
+#   For Gemini (no ChatML tokens), we append the instruction after the full
+#   prompt.  Either way the instruction is the last thing the model reads.
+#
+# WORDING: kept deliberately terse.  Verbose preambles cause some models to
+# repeat them in the response, which breaks the fence extractor.
 _EDIT_MODE_INSTRUCTION = (
-    "CRITICAL: Respond with ONLY the replacement code "
-    "inside a single fenced code block (``` ... ```). "
-    "No prose, no explanation — just the fence."
+    "CRITICAL: Respond with ONLY the replacement fenced code block, "
+    "preserving the opening fence line (e.g. ```mermaid or ```python) "
+    "and closing ``` exactly as they appear in the original. "
+    "No prose before or after — just the complete fence."
 )
 
-# ChatML marker that signals the end of the user turn in Continue's edit prompt.
-# Only present for ChatGPT-style backends.  Absent for Gemini.
+# ChatML boundary tokens injected by Continue into edit-mode prompts.
 _CHATML_USER_END = "<|im_end|>"
+_CHATML_ASSISTANT_START = "<|im_start|>assistant"
+
+
+def _strip_assistant_prefill(prompt: str) -> str:
+    """
+    Remove the pre-filled assistant text that Continue appends to ChatGPT prompts.
+
+    Continue appends ``<|im_start|>assistant [prefill sentence]`` to prime
+    ChatGPT's response.  That prefill ("Sure! Here's the entire code block,
+    including the rewritten portion:") instructs ChatGPT to reproduce the full
+    file, overriding every instruction in the user turn.
+
+    This function keeps the ``<|im_start|>assistant`` token (so ChatGPT knows
+    it is generating as the assistant) but strips the priming sentence, letting
+    ChatGPT generate from a clean slate.
+
+    No-op for prompts that do not contain the ChatML assistant-start token
+    (e.g. Gemini prompts).
+    """
+    if _CHATML_ASSISTANT_START not in prompt:
+        return prompt
+    head, tail = prompt.split(_CHATML_ASSISTANT_START, 1)
+    # tail is the prefill sentence (one line) — strip it entirely.
+    # If there is content after the first newline (unusual) preserve it.
+    newline_idx = tail.find('\n')
+    if newline_idx == -1:
+        return head + _CHATML_ASSISTANT_START
+    after = tail[newline_idx + 1:]
+    return head + _CHATML_ASSISTANT_START + ("\n" + after if after.strip() else "")
 
 
 # ── App factory ───────────────────────────────────────────────────────────────
@@ -423,7 +459,8 @@ def build_app(
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
         prompt_text = "\n".join(
-            f"{m['role']}: {m['content']}" for m in normalized if m["content"].strip()
+            f"{m['role']}: {m['content']}" for m in normalized
+            if isinstance(m.get("content"), str) and m["content"].strip()
         )
         prompt_tokens = estimate_tokens(prompt_text)
         completion_tokens = estimate_tokens(response_text)
@@ -514,6 +551,7 @@ def build_app(
         Continue's edit mode sends the selected text + instruction here as a
         plain string rather than a messages array.
         """
+        _log(f"[server] /v1/completions REQUEST received (stream={body.stream})", flush=True)
         if session_manager is None:
             raise HTTPException(status_code=503, detail="Session manager not ready")
 
@@ -525,35 +563,39 @@ def build_app(
         if not raw_prompt:
             raise HTTPException(status_code=400, detail="prompt cannot be empty")
 
-        # Step 1: reorder — moves instruction in front of any leading code block.
-        # Always applied regardless of compat; compat.process_user_message()
-        # runs afterwards as an additional (currently no-op) transform.
-        # reorder_user_message() must be called on the RAW prompt string,
-        # before any prefix assembly.
-        prompt = reorder_user_message(raw_prompt)
+        # NOTE: reorder_user_message is intentionally NOT called here.
+        # Continue's edit-mode prompt has its own carefully structured layout
+        # (file context, <START/STOP EDITING HERE> markers, template text, and
+        # ChatML tokens).  reorder_user_message would detect the leading ```
+        # fence and relocate the ChatML tokens to the front of the prompt,
+        # destroying the token sequence that ChatGPT relies on.
+        # The edit prompt is already correctly structured — leave it alone.
+        prompt = raw_prompt
         if compat is not None:
             prompt = compat.process_user_message(prompt)
 
-        # Step 2: inject the edit-mode instruction.
-        # Only skipped when the request looks like FIM (fill-in-middle):
-        # FIM payloads carry a non-empty `suffix` field; edit-mode payloads do not.
+        # Step 2: inject the edit-mode instruction and strip the ChatGPT prefill.
+        # Only skipped for FIM payloads (non-empty `suffix` field).
         is_fim = bool(body.suffix and body.suffix.strip())
         if not is_fim:
             if _CHATML_USER_END in prompt:
-                # ChatML format (ChatGPT via Continue): inject instruction at the end
-                # of the user turn, immediately before the boundary token.  This is
-                # the highest-authority position — the last thing the model reads
-                # before generating.  Prepending (the old approach) placed it at the
-                # far end of the context window where it was reliably ignored.
+                # ChatML (ChatGPT via Continue): inject before the user-turn closer
+                # so our instruction is the LAST thing in the user turn.
                 prompt = prompt.replace(
                     _CHATML_USER_END,
                     "\n\n" + _EDIT_MODE_INSTRUCTION + "\n" + _CHATML_USER_END,
-                    1,  # only patch the first occurrence
+                    1,
                 )
+                # Step 2b: strip the pre-filled assistant text that follows
+                # <|im_start|>assistant.  See _strip_assistant_prefill() docstring.
+                # This is the root-cause fix for ChatGPT ignoring edit instructions.
+                original_len = len(prompt)
+                prompt = _strip_assistant_prefill(prompt)
+                if len(prompt) != original_len:
+                    _log("[server] Stripped ChatGPT assistant prefill for edit mode.", flush=True)
                 _log("[server] Injected edit instruction at ChatML user-turn boundary.", flush=True)
             else:
-                # Non-ChatML (Gemini, others): append after the full prompt so the
-                # instruction is the last thing the model reads before generating.
+                # Non-ChatML (Gemini, others): append so instruction is last.
                 prompt = prompt + "\n\n" + _EDIT_MODE_INSTRUCTION
 
         session_key = make_session_key(
@@ -609,11 +651,15 @@ def build_app(
 
         if body.stream:
             _log(f"[server] Streaming /v1/completions ({len(response_text)} chars).", flush=True)
-            return StreamingResponse(
-                _stream_completion(response_text, chunk_id, created),
-                media_type="text/event-stream",
-                headers=resp_headers,
-            )
+            try:
+                return StreamingResponse(
+                    _stream_completion(response_text, chunk_id, created),
+                    media_type="text/event-stream",
+                    headers=resp_headers,
+                )
+            except Exception as exc:
+                _log(f"[server] Streaming error: {exc}", flush=True)
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
 
         return JSONResponse(content={
             "id": chunk_id,
